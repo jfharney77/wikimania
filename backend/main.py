@@ -34,9 +34,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Wikimania API", lifespan=lifespan)
 
-_cors_origins = os.getenv(
-    "CORS_ORIGINS", "http://localhost:5173,http://localhost:5174"
-).split(",")
+_cors_origins = [
+    o.strip().rstrip("/")
+    for o in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",")
+    if o.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,

@@ -24,6 +24,9 @@ async def lifespan(app: FastAPI):
     database_url = os.getenv("DATABASE_URL", "")
     if not database_url:
         raise RuntimeError("DATABASE_URL environment variable is required.")
+    # Railway emits postgres:// but asyncpg requires postgresql://
+    if database_url.startswith("postgres://"):
+        database_url = "postgresql://" + database_url[len("postgres://"):]
     await db.init_pool(database_url)
     yield
     await db.close_pool()

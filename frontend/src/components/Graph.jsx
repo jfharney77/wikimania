@@ -3,7 +3,6 @@ import ForceGraph2D from 'react-force-graph-2d'
 
 const API = import.meta.env.VITE_API_URL ?? ''
 
-// Map community id → color
 const COMMUNITY_COLORS = [
   '#6c8cff', '#a78bfa', '#34d399', '#f59e0b',
   '#f87171', '#38bdf8', '#fb7185', '#a3e635',
@@ -13,15 +12,13 @@ function communityColor(communityId) {
   return COMMUNITY_COLORS[(communityId ?? 0) % COMMUNITY_COLORS.length]
 }
 
-export default function Graph({ onNodeClick }) {
+export default function Graph({ wikiId, onNodeClick }) {
   const [graphData, setGraphData] = useState(null)
   const [message, setMessage] = useState('')
   const containerRef = useRef()
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 })
 
-  useEffect(() => {
-    fetchGraph()
-  }, [])
+  useEffect(() => { setGraphData(null); fetchGraph() }, [wikiId])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -35,11 +32,10 @@ export default function Graph({ onNodeClick }) {
 
   async function fetchGraph() {
     try {
-      const r = await fetch(`${API}/api/wiki/graph`)
+      const r = await fetch(`${API}/api/wikis/${wikiId}/graph`)
       const d = await r.json()
       if (!d.graph) { setMessage(d.message ?? 'No graph yet.'); return }
 
-      // graphify exports node_link format: { nodes: [...], links: [...] }
       const raw = d.graph
       const nodes = (raw.nodes ?? []).map(n => ({
         id: n.id,
@@ -52,13 +48,12 @@ export default function Graph({ onNodeClick }) {
         relation: l.relation ?? '',
       }))
       setGraphData({ nodes, links })
-    } catch (e) {
+    } catch {
       setMessage('Failed to load graph.')
     }
   }
 
   const nodeCanvasObject = useCallback((node, ctx, globalScale) => {
-    const label = node.label
     const fontSize = Math.max(10, 14 / globalScale)
     const r = 6
     ctx.beginPath()
@@ -70,17 +65,15 @@ export default function Graph({ onNodeClick }) {
       ctx.font = `${fontSize}px Inter, sans-serif`
       ctx.textAlign = 'center'
       ctx.fillStyle = '#e2e8f0'
-      ctx.fillText(label, node.x, node.y + r + fontSize)
+      ctx.fillText(node.label, node.x, node.y + r + fontSize)
     }
   }, [])
 
   const handleNodeClick = useCallback(node => {
-    // node.id is "article_<id>" — extract the numeric id
     const m = String(node.id).match(/article_(\d+)/)
     if (m) onNodeClick(parseInt(m[1], 10))
   }, [onNodeClick])
 
-  // Community legend
   const communities = graphData
     ? [...new Set(graphData.nodes.map(n => n.community))].sort((a, b) => a - b)
     : []

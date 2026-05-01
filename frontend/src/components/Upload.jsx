@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 
 const API = import.meta.env.VITE_API_URL ?? ''
 
-export default function Upload() {
+export default function Upload({ wikiId }) {
   const [file, setFile] = useState(null)
   const [dragging, setDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
@@ -13,11 +13,11 @@ export default function Upload() {
   const inputRef = useRef()
   const listRef = useRef()
 
-  useEffect(() => { fetchDocs() }, [])
+  useEffect(() => { fetchDocs() }, [wikiId])
 
   async function fetchDocs() {
     try {
-      const r = await fetch(`${API}/api/documents`)
+      const r = await fetch(`${API}/api/wikis/${wikiId}/documents`)
       const d = await r.json()
       setDocs(d.documents)
     } catch { /* ignore */ }
@@ -50,11 +50,10 @@ export default function Upload() {
     try {
       const form = new FormData()
       form.append('file', file)
-      const r = await fetch(`${API}/api/documents/upload`, { method: 'POST', body: form })
+      const r = await fetch(`${API}/api/wikis/${wikiId}/documents/upload`, { method: 'POST', body: form })
       if (!r.ok) { const e = await r.json(); throw new Error(e.detail ?? 'Upload failed') }
       const { job_id } = await r.json()
 
-      // Request notification permission
       if ('Notification' in window && Notification.permission === 'default') {
         Notification.requestPermission()
       }

@@ -9,9 +9,18 @@ async def init_pool(database_url: str):
     global _pool
     _pool = await asyncpg.create_pool(database_url, min_size=1, max_size=10)
     async with _pool.acquire() as conn:
+        # Core tables
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS wikis (
+                id         SERIAL PRIMARY KEY,
+                name       TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS source_documents (
                 id          SERIAL PRIMARY KEY,
+                wiki_id     INT REFERENCES wikis(id) ON DELETE CASCADE,
                 filename    TEXT NOT NULL,
                 content     TEXT NOT NULL,
                 uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -21,7 +30,8 @@ async def init_pool(database_url: str):
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS wiki_articles (
                 id         SERIAL PRIMARY KEY,
-                title      TEXT NOT NULL UNIQUE,
+                wiki_id    INT REFERENCES wikis(id) ON DELETE CASCADE,
+                title      TEXT NOT NULL,
                 content    TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -37,6 +47,7 @@ async def init_pool(database_url: str):
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS generation_jobs (
                 id           SERIAL PRIMARY KEY,
+                wiki_id      INT REFERENCES wikis(id) ON DELETE CASCADE,
                 doc_id       INT REFERENCES source_documents(id),
                 status       TEXT NOT NULL DEFAULT 'pending',
                 progress     TEXT NOT NULL DEFAULT '',
@@ -48,9 +59,35 @@ async def init_pool(database_url: str):
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS graph_snapshots (
                 id         SERIAL PRIMARY KEY,
+                wiki_id    INT REFERENCES wikis(id) ON DELETE CASCADE,
                 graph_json TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
+        """)
+
+        # Migration: add wiki_id to tables created before this feature
+        for table in ('source_documents', 'wiki_articles', 'generation_jobs', 'graph_snapshots'):
+            await conn.execute(f"""
+                ALTER TABLE {table} ADD COLUMN IF NOT EXISTS
+                wiki_id INT REFERENCES wikis(id) ON DELETE CASCADE
+            """)
+
+        # Migrate unique constraint on wiki_articles to (wiki_id, title)
+        await conn.execute("""
+            DO $$ BEGIN
+                ALTER TABLE wiki_articles DROP CONSTRAINT IF EXISTS wiki_articles_title_key;
+            EXCEPTION WHEN OTHERS THEN NULL; END $$;
+        """)
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'wiki_articles_wiki_id_title_key'
+                ) THEN
+                    ALTER TABLE wiki_articles
+                    ADD CONSTRAINT wiki_articles_wiki_id_title_key UNIQUE (wiki_id, title);
+                END IF;
+            END $$;
         """)
 
 
@@ -66,13 +103,53 @@ def get_pool() -> asyncpg.Pool:
     return _pool
 
 
-# --- Documents ---
+# ---------------------------------------------------------------------------
+# Wikis
+# ---------------------------------------------------------------------------
 
-async def save_document(filename: str, content: str) -> int:
+async def create_wiki(name: str) -> dict:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO source_documents (filename, content) VALUES ($1, $2) RETURNING id",
-            filename, content,
+            "INSERT INTO wikis (name) VALUES ($1) RETURNING id, name, created_at", name
+        )
+        return dict(row)
+
+
+async def list_wikis() -> list[dict]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, name, created_at FROM wikis ORDER BY created_at DESC"
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_wiki(wiki_id: int) -> dict | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, name, created_at FROM wikis WHERE id=$1", wiki_id
+        )
+        return dict(row) if row else None
+
+
+async def delete_wiki(wiki_id: int) -> int:
+    """Delete a wiki and all its content. Returns count of articles deleted."""
+    async with get_pool().acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM wiki_articles WHERE wiki_id=$1", wiki_id
+        )
+        await conn.execute("DELETE FROM wikis WHERE id=$1", wiki_id)  # cascades
+        return count
+
+
+# ---------------------------------------------------------------------------
+# Documents
+# ---------------------------------------------------------------------------
+
+async def save_document(wiki_id: int, filename: str, content: str) -> int:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO source_documents (wiki_id, filename, content) VALUES ($1, $2, $3) RETURNING id",
+            wiki_id, filename, content,
         )
         return row["id"]
 
@@ -84,27 +161,31 @@ async def set_document_status(doc_id: int, status: str):
         )
 
 
-async def list_documents() -> list[dict]:
+async def list_documents(wiki_id: int) -> list[dict]:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, filename, uploaded_at, status FROM source_documents ORDER BY uploaded_at DESC"
+            "SELECT id, filename, uploaded_at, status FROM source_documents WHERE wiki_id=$1 ORDER BY uploaded_at DESC",
+            wiki_id,
         )
         return [dict(r) for r in rows]
 
 
-# --- Jobs ---
+# ---------------------------------------------------------------------------
+# Jobs
+# ---------------------------------------------------------------------------
 
-async def create_job(doc_id: int) -> int:
+async def create_job(wiki_id: int, doc_id: int) -> int:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO generation_jobs (doc_id) VALUES ($1) RETURNING id", doc_id
+            "INSERT INTO generation_jobs (wiki_id, doc_id) VALUES ($1, $2) RETURNING id",
+            wiki_id, doc_id,
         )
         return row["id"]
 
 
 async def update_job_status(job_id: int, status: str, error: str | None = None):
     async with get_pool().acquire() as conn:
-        if status == "done":
+        if status in ("done", "error"):
             await conn.execute(
                 "UPDATE generation_jobs SET status=$1, error=$2, completed_at=now() WHERE id=$3",
                 status, error, job_id,
@@ -122,13 +203,14 @@ async def get_job(job_id: int) -> dict | None:
         return dict(row) if row else None
 
 
-# --- Wiki articles ---
+# ---------------------------------------------------------------------------
+# Wiki articles
+# ---------------------------------------------------------------------------
 
-async def upsert_article(title: str, content: str) -> tuple[int, bool]:
-    """Returns (article_id, was_created)."""
+async def upsert_article(wiki_id: int, title: str, content: str) -> tuple[int, bool]:
     async with get_pool().acquire() as conn:
         existing = await conn.fetchrow(
-            "SELECT id FROM wiki_articles WHERE title=$1", title
+            "SELECT id FROM wiki_articles WHERE wiki_id=$1 AND title=$2", wiki_id, title
         )
         if existing:
             await conn.execute(
@@ -138,24 +220,25 @@ async def upsert_article(title: str, content: str) -> tuple[int, bool]:
             return existing["id"], False
         else:
             row = await conn.fetchrow(
-                "INSERT INTO wiki_articles (title, content) VALUES ($1, $2) RETURNING id",
-                title, content,
+                "INSERT INTO wiki_articles (wiki_id, title, content) VALUES ($1, $2, $3) RETURNING id",
+                wiki_id, title, content,
             )
             return row["id"], True
 
 
-async def get_article_content(title: str) -> str | None:
+async def get_article_content(wiki_id: int, title: str) -> str | None:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT content FROM wiki_articles WHERE title=$1", title
+            "SELECT content FROM wiki_articles WHERE wiki_id=$1 AND title=$2", wiki_id, title
         )
         return row["content"] if row else None
 
 
-async def list_articles() -> list[dict]:
+async def list_articles(wiki_id: int) -> list[dict]:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, title, created_at, updated_at FROM wiki_articles ORDER BY title"
+            "SELECT id, title, created_at, updated_at FROM wiki_articles WHERE wiki_id=$1 ORDER BY title",
+            wiki_id,
         )
         return [dict(r) for r in rows]
 
@@ -169,10 +252,20 @@ async def get_article_by_id(article_id: int) -> dict | None:
         return dict(row) if row else None
 
 
-async def get_all_articles() -> list[dict]:
+async def get_all_articles(wiki_id: int) -> list[dict]:
     async with get_pool().acquire() as conn:
-        rows = await conn.fetch("SELECT id, title, content FROM wiki_articles")
+        rows = await conn.fetch(
+            "SELECT id, title, content FROM wiki_articles WHERE wiki_id=$1", wiki_id
+        )
         return [dict(r) for r in rows]
+
+
+async def list_article_titles(wiki_id: int) -> list[str]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT title FROM wiki_articles WHERE wiki_id=$1 ORDER BY title", wiki_id
+        )
+        return [r["title"] for r in rows]
 
 
 _STOP_WORDS = frozenset({
@@ -185,20 +278,19 @@ _STOP_WORDS = frozenset({
 })
 
 
-async def search_articles(query: str, limit: int = 8) -> list[dict]:
-    # Extract meaningful keywords from the natural-language query
+async def search_articles(wiki_id: int, query: str, limit: int = 8) -> list[dict]:
     words = [w for w in re.split(r'\W+', query.lower()) if len(w) > 2 and w not in _STOP_WORDS]
     if not words:
-        words = [query.lower()]  # fallback: treat full query as one term
+        words = [query.lower()]
 
     async with get_pool().acquire() as conn:
-        # Score each article by keyword hits; title matches count double
         seen: dict[int, dict] = {}
         for word in words:
             pattern = f'%{word}%'
             rows = await conn.fetch(
-                "SELECT id, title, content FROM wiki_articles WHERE title ILIKE $1 OR content ILIKE $1",
-                pattern,
+                """SELECT id, title, content FROM wiki_articles
+                   WHERE wiki_id=$1 AND (title ILIKE $2 OR content ILIKE $2)""",
+                wiki_id, pattern,
             )
             for row in rows:
                 d = dict(row)
@@ -211,13 +303,9 @@ async def search_articles(query: str, limit: int = 8) -> list[dict]:
         return [item['data'] for item in ranked[:limit]]
 
 
-async def list_article_titles() -> list[str]:
-    async with get_pool().acquire() as conn:
-        rows = await conn.fetch("SELECT title FROM wiki_articles ORDER BY title")
-        return [r["title"] for r in rows]
-
-
-# --- Article links ---
+# ---------------------------------------------------------------------------
+# Article links
+# ---------------------------------------------------------------------------
 
 async def replace_article_links(article_id: int, to_titles: list[str]):
     async with get_pool().acquire() as conn:
@@ -229,34 +317,51 @@ async def replace_article_links(article_id: int, to_titles: list[str]):
             )
 
 
-async def get_all_article_links() -> list[dict]:
+async def get_all_article_links(wiki_id: int) -> list[dict]:
     async with get_pool().acquire() as conn:
-        rows = await conn.fetch("SELECT from_id, to_title FROM article_links")
+        rows = await conn.fetch(
+            """SELECT al.from_id, al.to_title
+               FROM article_links al
+               JOIN wiki_articles wa ON wa.id = al.from_id
+               WHERE wa.wiki_id=$1""",
+            wiki_id,
+        )
         return [dict(r) for r in rows]
 
 
-# --- Graph snapshots ---
+# ---------------------------------------------------------------------------
+# Graph snapshots
+# ---------------------------------------------------------------------------
 
-async def save_graph_snapshot(graph_json: str):
+async def save_graph_snapshot(wiki_id: int, graph_json: str):
     async with get_pool().acquire() as conn:
         await conn.execute(
-            "INSERT INTO graph_snapshots (graph_json) VALUES ($1)", graph_json
+            "INSERT INTO graph_snapshots (wiki_id, graph_json) VALUES ($1, $2)",
+            wiki_id, graph_json,
         )
 
 
-async def get_latest_graph() -> str | None:
+async def get_latest_graph(wiki_id: int) -> str | None:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT graph_json FROM graph_snapshots ORDER BY created_at DESC LIMIT 1"
+            "SELECT graph_json FROM graph_snapshots WHERE wiki_id=$1 ORDER BY created_at DESC LIMIT 1",
+            wiki_id,
         )
         return row["graph_json"] if row else None
 
 
-async def reset_wiki() -> dict:
-    """Delete all wiki content. Source document records are kept for history."""
+# ---------------------------------------------------------------------------
+# Reset (content only — keeps the wiki record)
+# ---------------------------------------------------------------------------
+
+async def reset_wiki_content(wiki_id: int) -> dict:
     async with get_pool().acquire() as conn:
-        articles = await conn.fetchval("SELECT COUNT(*) FROM wiki_articles")
-        await conn.execute("DELETE FROM wiki_articles")          # cascades to article_links
-        await conn.execute("DELETE FROM graph_snapshots")
-        await conn.execute("UPDATE source_documents SET status='archived'")
+        articles = await conn.fetchval(
+            "SELECT COUNT(*) FROM wiki_articles WHERE wiki_id=$1", wiki_id
+        )
+        await conn.execute("DELETE FROM wiki_articles WHERE wiki_id=$1", wiki_id)
+        await conn.execute("DELETE FROM graph_snapshots WHERE wiki_id=$1", wiki_id)
+        await conn.execute(
+            "UPDATE source_documents SET status='archived' WHERE wiki_id=$1", wiki_id
+        )
         return {"articles_deleted": articles}

@@ -2,7 +2,6 @@ import asyncio
 import re
 import tempfile
 import os
-import json
 from asyncio import Queue
 
 import db
@@ -15,6 +14,7 @@ def _fill(template: str, **kwargs) -> str:
     for key, value in kwargs.items():
         result = result.replace("{" + key + "}", str(value))
     return result
+
 
 EXTRACT_CONCEPTS_PROMPT = """\
 You are analyzing a document to identify key concepts for a wiki knowledge base.
@@ -84,18 +84,22 @@ Wiki articles:
 
 Question: {question}"""
 
+STUB_CONTENT = """\
+*This article was automatically created as a stub because other wiki articles link here. Upload more documents to expand it.*
+"""
+
 
 def _parse_wikilinks(content: str) -> list[str]:
     return list(set(re.findall(r"\[\[([^\]]+)\]\]", content)))
 
 
-async def generate_wiki(job_id: int, doc_id: int, content: str, queue: Queue):
+async def generate_wiki(wiki_id: int, job_id: int, doc_id: int, content: str, queue: Queue):
     try:
         await db.update_job_status(job_id, "running")
 
         # Phase 1 — concept extraction
         await queue.put({"type": "phase", "phase": 1, "message": "Extracting concepts from document..."})
-        existing_titles = await db.list_article_titles()
+        existing_titles = await db.list_article_titles(wiki_id)
         titles_preview = ", ".join(existing_titles[:50]) or "none yet"
         prompt = _fill(
             EXTRACT_CONCEPTS_PROMPT,
@@ -107,7 +111,7 @@ async def generate_wiki(job_id: int, doc_id: int, content: str, queue: Queue):
 
         if not concepts:
             await queue.put({"type": "warning", "message": "No new concepts found in this document."})
-            await queue.put({"type": "done", "articles_created": 0, "articles_updated": 0, "message": "No new concepts found."})
+            await queue.put({"type": "done", "articles_created": 0, "articles_updated": 0, "stubs_created": 0, "message": "No new concepts found."})
             await db.update_job_status(job_id, "done")
             await db.set_document_status(doc_id, "done")
             return
@@ -116,14 +120,14 @@ async def generate_wiki(job_id: int, doc_id: int, content: str, queue: Queue):
 
         # Phase 2 — write / expand articles
         await queue.put({"type": "phase", "phase": 2, "message": f"Writing {len(concepts)} wiki articles..."})
-        all_titles = await db.list_article_titles()
+        all_titles = await db.list_article_titles(wiki_id)
         related = ", ".join(all_titles[:80])
 
         created = 0
         updated = 0
 
         for i, title in enumerate(concepts):
-            existing = await db.get_article_content(title)
+            existing = await db.get_article_content(wiki_id, title)
 
             if existing:
                 system = "You are a wiki author expanding an existing article."
@@ -144,12 +148,10 @@ async def generate_wiki(job_id: int, doc_id: int, content: str, queue: Queue):
                 )
 
             article_content = await llm.call_reasoning(system, user)
-            # Strip <think> blocks that reasoning models emit
             article_content = re.sub(r"<think>.*?</think>", "", article_content, flags=re.DOTALL).strip()
 
-            article_id, was_created = await db.upsert_article(title, article_content)
+            article_id, was_created = await db.upsert_article(wiki_id, title, article_content)
 
-            # Update link table
             wikilinks = _parse_wikilinks(article_content)
             await db.replace_article_links(article_id, wikilinks)
 
@@ -166,12 +168,12 @@ async def generate_wiki(job_id: int, doc_id: int, content: str, queue: Queue):
                 "total": len(concepts),
             })
 
-        # Phase 2b — create stubs for dangling wikilinks
-        stubs = await _create_stubs(queue)
+        # Phase 2b — stubs for dangling wikilinks
+        stubs = await _create_stubs(wiki_id, queue)
 
         # Phase 3 — rebuild knowledge graph
         await queue.put({"type": "phase", "phase": 3, "message": "Rebuilding knowledge graph..."})
-        await _rebuild_graph()
+        await _rebuild_graph(wiki_id)
         await queue.put({"type": "graph_done", "message": "Knowledge graph updated."})
 
         await db.update_job_status(job_id, "done")
@@ -191,14 +193,9 @@ async def generate_wiki(job_id: int, doc_id: int, content: str, queue: Queue):
         await queue.put({"type": "error", "message": err})
 
 
-STUB_CONTENT = """\
-*This article was automatically created as a stub because other wiki articles link here. Upload more documents to expand it.*
-"""
-
-async def _create_stubs(queue: Queue) -> int:
-    """Create minimal stub articles for any wikilink target that has no article yet."""
-    all_links = await db.get_all_article_links()
-    existing_titles = set(await db.list_article_titles())
+async def _create_stubs(wiki_id: int, queue: Queue) -> int:
+    all_links = await db.get_all_article_links(wiki_id)
+    existing_titles = set(await db.list_article_titles(wiki_id))
 
     dangling = {link["to_title"] for link in all_links} - existing_titles
     if not dangling:
@@ -206,28 +203,16 @@ async def _create_stubs(queue: Queue) -> int:
 
     count = 0
     for title in sorted(dangling):
-        await db.upsert_article(title, STUB_CONTENT)
+        await db.upsert_article(wiki_id, title, STUB_CONTENT)
         count += 1
         await queue.put({"type": "stub", "title": title})
 
     return count
 
 
-def _rebuild_graph_sync() -> str:
-    """Run graphify build/cluster/export synchronously (called via run_in_executor)."""
-    from graphify.build import build_from_json
-    from graphify.cluster import cluster
-    from graphify.export import to_json
-
-    # Pull data from DB synchronously via asyncpg is not possible here;
-    # data is passed in via closure (set before calling run_in_executor).
-    # See _rebuild_graph() below.
-    raise RuntimeError("Call _rebuild_graph() instead")
-
-
-async def _rebuild_graph():
-    articles = await db.get_all_articles()
-    links = await db.get_all_article_links()
+async def _rebuild_graph(wiki_id: int):
+    articles = await db.get_all_articles(wiki_id)
+    links = await db.get_all_article_links(wiki_id)
 
     article_index = {a["title"]: a["id"] for a in articles}
 
@@ -265,7 +250,7 @@ async def _rebuild_graph():
     graph_json = await asyncio.get_event_loop().run_in_executor(
         None, _graphify_build, extraction
     )
-    await db.save_graph_snapshot(graph_json)
+    await db.save_graph_snapshot(wiki_id, graph_json)
 
 
 def _graphify_build(extraction: dict) -> str:
@@ -287,8 +272,8 @@ def _graphify_build(extraction: dict) -> str:
         os.unlink(tmp_path)
 
 
-async def answer_query(question: str) -> dict:
-    results = await db.search_articles(question)
+async def answer_query(wiki_id: int, question: str) -> dict:
+    results = await db.search_articles(wiki_id, question)
     if not results:
         return {"answer": "No relevant wiki articles found for your question.", "sources": []}
 

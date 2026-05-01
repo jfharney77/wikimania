@@ -3,14 +3,14 @@ import ReactMarkdown from 'react-markdown'
 
 const API = import.meta.env.VITE_API_URL ?? ''
 
-export default function WikiBrowser({ selectedId, onSelect }) {
+export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
   const [articles, setArticles] = useState([])
   const [query, setQuery] = useState('')
   const [article, setArticle] = useState(null)
   const [loading, setLoading] = useState(false)
   const [confirming, setConfirming] = useState(false)
 
-  useEffect(() => { fetchList() }, [])
+  useEffect(() => { setArticle(null); setQuery(''); fetchList() }, [wikiId])
 
   useEffect(() => {
     if (selectedId != null) loadArticle(selectedId)
@@ -18,7 +18,7 @@ export default function WikiBrowser({ selectedId, onSelect }) {
 
   async function fetchList() {
     try {
-      const r = await fetch(`${API}/api/wiki/articles`)
+      const r = await fetch(`${API}/api/wikis/${wikiId}/articles`)
       const d = await r.json()
       setArticles(d.articles)
     } catch { /* ignore */ }
@@ -27,7 +27,7 @@ export default function WikiBrowser({ selectedId, onSelect }) {
   async function loadArticle(id) {
     setLoading(true)
     try {
-      const r = await fetch(`${API}/api/wiki/articles/${id}`)
+      const r = await fetch(`${API}/api/wikis/${wikiId}/articles/${id}`)
       const d = await r.json()
       setArticle(d)
       onSelect(id)
@@ -37,19 +37,20 @@ export default function WikiBrowser({ selectedId, onSelect }) {
   }
 
   async function handleExport() {
-    const r = await fetch(`${API}/api/wiki/export`)
+    const r = await fetch(`${API}/api/wikis/${wikiId}/export`)
     if (!r.ok) return
     const blob = await r.blob()
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = 'wikimania-vault.zip'
+    const cd = r.headers.get('Content-Disposition') ?? ''
+    a.download = cd.match(/filename=(.+)/)?.[1] ?? 'vault.zip'
     a.click()
     URL.revokeObjectURL(url)
   }
 
   async function handleReset() {
-    const r = await fetch(`${API}/api/wiki`, { method: 'DELETE' })
+    const r = await fetch(`${API}/api/wikis/${wikiId}/content`, { method: 'DELETE' })
     if (!r.ok) return
     setArticles([])
     setArticle(null)
@@ -57,7 +58,6 @@ export default function WikiBrowser({ selectedId, onSelect }) {
     onSelect(null)
   }
 
-  // Render [[wikilinks]] as clickable spans
   const WikilinkRenderer = useCallback(({ children }) => {
     const text = String(children)
     const parts = text.split(/(\[\[[^\]]+\]\])/g)
@@ -94,15 +94,16 @@ export default function WikiBrowser({ selectedId, onSelect }) {
       {confirming && (
         <div className="confirm-overlay">
           <div className="confirm-dialog">
-            <h3>Delete entire wiki?</h3>
-            <p>All {articles.length} articles and the knowledge graph will be permanently deleted. Source document history is kept.</p>
+            <h3>Reset wiki content?</h3>
+            <p>All {articles.length} articles and the knowledge graph will be deleted. The wiki itself and document history are kept.</p>
             <div className="confirm-actions">
-              <button className="btn btn-danger" onClick={handleReset}>Yes, delete wiki</button>
+              <button className="btn btn-danger" onClick={handleReset}>Yes, reset content</button>
               <button className="btn btn-outline" onClick={() => setConfirming(false)}>Cancel</button>
             </div>
           </div>
         </div>
       )}
+
       <div className="wiki-sidebar">
         <div className="wiki-sidebar-header">
           <input
@@ -112,8 +113,8 @@ export default function WikiBrowser({ selectedId, onSelect }) {
           />
           {articles.length > 0 && (
             <button
-              className="btn btn-danger-outline"
-              title="Delete entire wiki"
+              className="btn-danger-outline"
+              title="Reset wiki content"
               onClick={() => setConfirming(true)}
             >
               ✕
@@ -156,9 +157,7 @@ export default function WikiBrowser({ selectedId, onSelect }) {
               Last updated: {new Date(article.updated_at).toLocaleString()}
             </div>
             <div className="markdown">
-              <ReactMarkdown
-                components={{ p: WikilinkRenderer }}
-              >
+              <ReactMarkdown components={{ p: WikilinkRenderer }}>
                 {article.content}
               </ReactMarkdown>
             </div>

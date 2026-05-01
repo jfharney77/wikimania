@@ -16,7 +16,6 @@ load_dotenv()
 import db
 import pipeline as wiki_pipeline
 
-# In-memory SSE queues keyed by job_id
 _job_queues: dict[int, asyncio.Queue] = {}
 
 
@@ -45,11 +44,43 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
+# Wikis
+# ---------------------------------------------------------------------------
+
+class WikiCreate(BaseModel):
+    name: str
+
+
+@app.get("/api/wikis")
+async def list_wikis():
+    return {"wikis": await db.list_wikis()}
+
+
+@app.post("/api/wikis", status_code=201)
+async def create_wiki(req: WikiCreate):
+    if not req.name.strip():
+        raise HTTPException(status_code=400, detail="Wiki name is required.")
+    return await db.create_wiki(req.name.strip())
+
+
+@app.delete("/api/wikis/{wiki_id}")
+async def delete_wiki(wiki_id: int):
+    wiki = await db.get_wiki(wiki_id)
+    if not wiki:
+        raise HTTPException(status_code=404, detail="Wiki not found.")
+    count = await db.delete_wiki(wiki_id)
+    return {"message": f"Wiki '{wiki['name']}' deleted.", "articles_deleted": count}
+
+
+# ---------------------------------------------------------------------------
 # Documents
 # ---------------------------------------------------------------------------
 
-@app.post("/api/documents/upload")
-async def upload_document(file: UploadFile = File(...)):
+@app.post("/api/wikis/{wiki_id}/documents/upload")
+async def upload_document(wiki_id: int, file: UploadFile = File(...)):
+    wiki = await db.get_wiki(wiki_id)
+    if not wiki:
+        raise HTTPException(status_code=404, detail="Wiki not found.")
     if not file.filename.endswith(".md"):
         raise HTTPException(status_code=400, detail="Only .md files are accepted.")
 
@@ -57,20 +88,22 @@ async def upload_document(file: UploadFile = File(...)):
     if not content.strip():
         raise HTTPException(status_code=400, detail="File is empty.")
 
-    doc_id = await db.save_document(filename=file.filename, content=content)
-    job_id = await db.create_job(doc_id=doc_id)
+    doc_id = await db.save_document(wiki_id=wiki_id, filename=file.filename, content=content)
+    job_id = await db.create_job(wiki_id=wiki_id, doc_id=doc_id)
 
     queue: asyncio.Queue = asyncio.Queue()
     _job_queues[job_id] = queue
 
-    asyncio.create_task(wiki_pipeline.generate_wiki(job_id, doc_id, content, queue))
+    asyncio.create_task(
+        wiki_pipeline.generate_wiki(wiki_id, job_id, doc_id, content, queue)
+    )
 
     return {"job_id": job_id, "doc_id": doc_id, "filename": file.filename}
 
 
-@app.get("/api/documents")
-async def list_documents():
-    return {"documents": await db.list_documents()}
+@app.get("/api/wikis/{wiki_id}/documents")
+async def list_documents(wiki_id: int):
+    return {"documents": await db.list_documents(wiki_id)}
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +115,6 @@ async def stream_job(job_id: int):
     async def event_generator():
         queue = _job_queues.get(job_id)
         if not queue:
-            # Job already completed or unknown — return stored status
             job = await db.get_job(job_id)
             status = job["status"] if job else "unknown"
             yield f"data: {json.dumps({'type': status, 'message': f'Job {status}'})}\n\n"
@@ -120,13 +152,13 @@ async def get_job(job_id: int):
 # Wiki articles
 # ---------------------------------------------------------------------------
 
-@app.get("/api/wiki/articles")
-async def list_articles():
-    return {"articles": await db.list_articles()}
+@app.get("/api/wikis/{wiki_id}/articles")
+async def list_articles(wiki_id: int):
+    return {"articles": await db.list_articles(wiki_id)}
 
 
-@app.get("/api/wiki/articles/{article_id}")
-async def get_article(article_id: int):
+@app.get("/api/wikis/{wiki_id}/articles/{article_id}")
+async def get_article(wiki_id: int, article_id: int):
     article = await db.get_article_by_id(article_id)
     if not article:
         raise HTTPException(status_code=404, detail="Article not found.")
@@ -141,20 +173,20 @@ class QueryRequest(BaseModel):
     question: str
 
 
-@app.post("/api/wiki/query")
-async def query_wiki(req: QueryRequest):
+@app.post("/api/wikis/{wiki_id}/query")
+async def query_wiki(wiki_id: int, req: QueryRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question is required.")
-    return await wiki_pipeline.answer_query(req.question)
+    return await wiki_pipeline.answer_query(wiki_id, req.question)
 
 
 # ---------------------------------------------------------------------------
 # Knowledge graph
 # ---------------------------------------------------------------------------
 
-@app.get("/api/wiki/graph")
-async def get_graph():
-    graph_json = await db.get_latest_graph()
+@app.get("/api/wikis/{wiki_id}/graph")
+async def get_graph(wiki_id: int):
+    graph_json = await db.get_latest_graph(wiki_id)
     if not graph_json:
         return {"graph": None, "message": "No graph yet — upload a document first."}
     return {"graph": json.loads(graph_json)}
@@ -164,9 +196,10 @@ async def get_graph():
 # Obsidian export
 # ---------------------------------------------------------------------------
 
-@app.get("/api/wiki/export")
-async def export_vault():
-    articles = await db.get_all_articles()
+@app.get("/api/wikis/{wiki_id}/export")
+async def export_vault(wiki_id: int):
+    wiki = await db.get_wiki(wiki_id)
+    articles = await db.get_all_articles(wiki_id)
     if not articles:
         raise HTTPException(status_code=404, detail="No articles to export.")
 
@@ -177,18 +210,22 @@ async def export_vault():
             zf.writestr(filename, article["content"])
     buf.seek(0)
 
+    safe_name = (wiki["name"] if wiki else "wiki").replace(" ", "-")
     return StreamingResponse(
         buf,
         media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=wikimania-vault.zip"},
+        headers={"Content-Disposition": f"attachment; filename={safe_name}-vault.zip"},
     )
 
 
 # ---------------------------------------------------------------------------
-# Reset
+# Reset wiki content (keep wiki record)
 # ---------------------------------------------------------------------------
 
-@app.delete("/api/wiki")
-async def reset_wiki():
-    result = await db.reset_wiki()
-    return {"message": f"Wiki reset. {result['articles_deleted']} articles deleted.", **result}
+@app.delete("/api/wikis/{wiki_id}/content")
+async def reset_wiki_content(wiki_id: int):
+    wiki = await db.get_wiki(wiki_id)
+    if not wiki:
+        raise HTTPException(status_code=404, detail="Wiki not found.")
+    result = await db.reset_wiki_content(wiki_id)
+    return {"message": f"{result['articles_deleted']} articles deleted.", **result}

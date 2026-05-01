@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown'
 
 const API = import.meta.env.VITE_API_URL ?? ''
 
-export default function Query({ onOpenArticle }) {
+export default function Query({ wikiId, onOpenArticle }) {
   const [question, setQuestion] = useState('')
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState(null)
@@ -17,7 +17,7 @@ export default function Query({ onOpenArticle }) {
     setError('')
 
     try {
-      const r = await fetch(`${API}/api/wiki/query`, {
+      const r = await fetch(`${API}/api/wikis/${wikiId}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question }),
@@ -47,16 +47,13 @@ export default function Query({ onOpenArticle }) {
         </button>
       </form>
 
-      {error && (
-        <div className="answer-box" style={{ color: 'var(--red)' }}>{error}</div>
-      )}
+      {error && <div className="answer-box" style={{ color: 'var(--red)' }}>{error}</div>}
 
       {result && (
         <div className="answer-box">
           <div className="markdown">
             <ReactMarkdown>{result.answer}</ReactMarkdown>
           </div>
-
           {result.sources?.length > 0 && (
             <div className="sources">
               <h4>Sources</h4>
@@ -77,7 +74,7 @@ export default function Query({ onOpenArticle }) {
 
       {!result && !error && !loading && (
         <p style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>
-          Questions are answered using only the articles in your wiki. Upload documents first to build your knowledge base.
+          Questions are answered using only the articles in your wiki.
         </p>
       )}
     </div>

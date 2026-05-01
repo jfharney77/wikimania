@@ -150,6 +150,10 @@ async def generate_wiki(wiki_id: int, job_id: int, doc_id: int, content: str, qu
             article_content = await llm.call_reasoning(system, user)
             article_content = re.sub(r"<think>.*?</think>", "", article_content, flags=re.DOTALL).strip()
 
+            # Brief pause between articles to stay within Groq's 6000 TPM limit.
+            if i > 0:
+                await asyncio.sleep(3)
+
             article_id, was_created = await db.upsert_article(wiki_id, title, article_content)
 
             wikilinks = _parse_wikilinks(article_content)

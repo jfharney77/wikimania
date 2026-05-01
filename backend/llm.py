@@ -1,3 +1,4 @@
+import asyncio
 import httpx
 import os
 import json
@@ -11,20 +12,35 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 
-async def _call_groq(model: str, messages: list[dict], timeout: float = 120.0) -> str:
-    async with httpx.AsyncClient(timeout=timeout) as client:
+async def _call_groq(model: str, messages: list[dict], timeout: float = 120.0, max_retries: int = 6) -> str:
+    for attempt in range(max_retries):
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                resp = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                    json={"model": model, "messages": messages},
+                )
+            except httpx.ConnectError:
+                raise HTTPException(status_code=503, detail="Cannot connect to Groq API.")
+
+        if resp.status_code == 429:
+            body = resp.json()
+            msg = body.get("error", {}).get("message", "")
+            m = re.search(r"try again in (\d+\.?\d*)s", msg)
+            wait = float(m.group(1)) + 1.5 if m else 20.0
+            print(f"[rate limit] {model} — sleeping {wait:.1f}s (attempt {attempt + 1}/{max_retries})", flush=True)
+            await asyncio.sleep(wait)
+            continue
+
         try:
-            resp = await client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-                json={"model": model, "messages": messages},
-            )
             resp.raise_for_status()
-        except httpx.ConnectError:
-            raise HTTPException(status_code=503, detail="Cannot connect to Groq API.")
         except httpx.HTTPStatusError as e:
             raise HTTPException(status_code=502, detail=f"Groq error: {e.response.text}")
-    return resp.json()["choices"][0]["message"]["content"]
+
+        return resp.json()["choices"][0]["message"]["content"]
+
+    raise HTTPException(status_code=429, detail=f"Groq rate limit exceeded after {max_retries} retries.")
 
 
 async def _call_ollama(model: str, prompt: str, timeout: float = 120.0) -> str:

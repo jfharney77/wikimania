@@ -118,6 +118,9 @@ async def list_documents(wiki_id: int):
 @app.get("/api/jobs/{job_id}/stream")
 async def stream_job(job_id: int):
     async def event_generator():
+        # Send immediately so Railway's HTTP/2 proxy doesn't time out before the first byte.
+        yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+
         queue = _job_queues.get(job_id)
         if not queue:
             job = await db.get_job(job_id)
@@ -127,7 +130,7 @@ async def stream_job(job_id: int):
 
         while True:
             try:
-                event = await asyncio.wait_for(queue.get(), timeout=25.0)
+                event = await asyncio.wait_for(queue.get(), timeout=15.0)
             except asyncio.TimeoutError:
                 yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
                 continue
@@ -141,7 +144,11 @@ async def stream_job(job_id: int):
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 

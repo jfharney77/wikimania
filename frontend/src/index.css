@@ -1,0 +1,175 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --surface2: #23273a;
+  --border: #2e3350;
+  --accent: #6c8cff;
+  --accent2: #a78bfa;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --green: #4ade80;
+  --yellow: #facc15;
+  --red: #f87171;
+  --radius: 8px;
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+body { background: var(--bg); color: var(--text); min-height: 100vh; }
+
+/* Layout */
+.app { display: flex; flex-direction: column; min-height: 100vh; }
+
+.topbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  height: 56px;
+  flex-shrink: 0;
+}
+
+.topbar h1 { font-size: 1.1rem; font-weight: 700; color: var(--accent); letter-spacing: 0.02em; }
+
+.tabs { display: flex; gap: 0.25rem; }
+
+.tab {
+  padding: 0.4rem 1rem;
+  border-radius: var(--radius);
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.15s, color 0.15s;
+}
+.tab:hover { background: var(--surface2); color: var(--text); }
+.tab.active { background: var(--surface2); color: var(--accent); font-weight: 600; }
+
+.content { flex: 1; display: flex; overflow: hidden; }
+
+/* Cards & panels */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+}
+
+/* Upload tab */
+.upload-tab { padding: 2rem; max-width: 680px; margin: 0 auto; width: 100%; }
+.upload-tab h2 { font-size: 1.2rem; margin-bottom: 0.5rem; }
+.upload-tab p { color: var(--muted); margin-bottom: 1.5rem; font-size: 0.9rem; }
+
+.dropzone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 3rem 2rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  margin-bottom: 1.5rem;
+}
+.dropzone:hover, .dropzone.drag-over { border-color: var(--accent); background: rgba(108,140,255,0.05); }
+.dropzone input { display: none; }
+.dropzone-icon { font-size: 2.5rem; margin-bottom: 0.75rem; }
+.dropzone p { color: var(--muted); margin: 0; }
+.dropzone strong { color: var(--accent); }
+
+.btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  padding: 0.6rem 1.25rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+  transition: opacity 0.15s;
+}
+.btn:hover { opacity: 0.85; }
+.btn:disabled { opacity: 0.4; cursor: default; }
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.btn-outline:hover { background: var(--surface2); }
+
+/* Progress / events */
+.progress-area { margin-top: 1.5rem; }
+.phase-label { font-size: 0.85rem; color: var(--accent); font-weight: 600; margin-bottom: 0.5rem; }
+.progress-bar-track { background: var(--surface2); border-radius: 4px; height: 6px; overflow: hidden; margin-bottom: 1rem; }
+.progress-bar-fill { background: var(--accent); height: 100%; border-radius: 4px; transition: width 0.3s; }
+
+.event-list { list-style: none; font-size: 0.82rem; color: var(--muted); max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+.event-list li { padding: 2px 0; }
+.event-list .ev-created { color: var(--green); }
+.event-list .ev-updated { color: var(--yellow); }
+.event-list .ev-error { color: var(--red); }
+.event-list .ev-done { color: var(--green); font-weight: 600; }
+
+/* Doc history */
+.doc-list { margin-top: 2rem; }
+.doc-list h3 { font-size: 0.9rem; color: var(--muted); margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.doc-item { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+.doc-item:last-child { border-bottom: none; }
+.doc-status { font-size: 0.75rem; padding: 2px 8px; border-radius: 99px; }
+.status-done { background: rgba(74,222,128,0.15); color: var(--green); }
+.status-pending { background: rgba(250,204,21,0.15); color: var(--yellow); }
+.status-error { background: rgba(248,113,113,0.15); color: var(--red); }
+
+/* Wiki browser tab */
+.wiki-tab { display: flex; width: 100%; overflow: hidden; }
+.wiki-sidebar { width: 280px; flex-shrink: 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+.wiki-sidebar-header { padding: 1rem; border-bottom: 1px solid var(--border); display: flex; gap: 0.5rem; align-items: center; }
+.wiki-sidebar-header input { flex: 1; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.4rem 0.75rem; color: var(--text); font-size: 0.85rem; outline: none; }
+.wiki-sidebar-header input:focus { border-color: var(--accent); }
+.article-list { flex: 1; overflow-y: auto; padding: 0.5rem; }
+.article-item { padding: 0.5rem 0.75rem; border-radius: var(--radius); cursor: pointer; font-size: 0.875rem; transition: background 0.1s; color: var(--text); }
+.article-item:hover { background: var(--surface2); }
+.article-item.active { background: var(--surface2); color: var(--accent); font-weight: 600; }
+
+.wiki-reader { flex: 1; overflow-y: auto; padding: 2rem; }
+.wiki-reader-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); font-size: 0.95rem; }
+.wiki-reader-content h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
+.wiki-meta { font-size: 0.8rem; color: var(--muted); margin-bottom: 1.5rem; }
+.wiki-export-btn { margin-top: 1rem; }
+
+/* Markdown rendering */
+.markdown { line-height: 1.7; font-size: 0.95rem; }
+.markdown h1, .markdown h2, .markdown h3 { margin: 1.5rem 0 0.5rem; line-height: 1.3; }
+.markdown h2 { font-size: 1.15rem; border-bottom: 1px solid var(--border); padding-bottom: 0.25rem; }
+.markdown h3 { font-size: 1rem; }
+.markdown p { margin-bottom: 0.85rem; }
+.markdown ul, .markdown ol { padding-left: 1.5rem; margin-bottom: 0.85rem; }
+.markdown li { margin-bottom: 0.25rem; }
+.markdown code { background: var(--surface2); padding: 2px 5px; border-radius: 4px; font-size: 0.85em; }
+.markdown pre { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; overflow-x: auto; margin-bottom: 1rem; }
+.wikilink { color: var(--accent); cursor: pointer; text-decoration: none; }
+.wikilink:hover { text-decoration: underline; }
+
+/* Graph tab */
+.graph-tab { width: 100%; position: relative; overflow: hidden; }
+.graph-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); }
+.graph-legend { position: absolute; top: 1rem; right: 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.75rem 1rem; font-size: 0.8rem; pointer-events: none; }
+.graph-legend h4 { margin-bottom: 0.4rem; color: var(--muted); }
+
+/* Query tab */
+.query-tab { padding: 2rem; max-width: 780px; margin: 0 auto; width: 100%; }
+.query-tab h2 { font-size: 1.2rem; margin-bottom: 1.5rem; }
+.query-form { display: flex; gap: 0.75rem; margin-bottom: 1.5rem; }
+.query-form input { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.6rem 1rem; color: var(--text); font-size: 0.95rem; outline: none; }
+.query-form input:focus { border-color: var(--accent); }
+
+.answer-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1rem; }
+.answer-box .sources { margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
+.answer-box .sources h4 { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.4rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.source-chip { display: inline-block; background: var(--surface2); border: 1px solid var(--border); border-radius: 99px; padding: 2px 10px; font-size: 0.78rem; margin: 2px; cursor: pointer; color: var(--accent); }
+.source-chip:hover { border-color: var(--accent); }
+
+.spinner { display: inline-block; width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 0.5rem; }
+@keyframes spin { to { transform: rotate(360deg); } }

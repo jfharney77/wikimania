@@ -250,3 +250,13 @@ async def get_latest_graph() -> str | None:
             "SELECT graph_json FROM graph_snapshots ORDER BY created_at DESC LIMIT 1"
         )
         return row["graph_json"] if row else None
+
+
+async def reset_wiki() -> dict:
+    """Delete all wiki content. Source document records are kept for history."""
+    async with get_pool().acquire() as conn:
+        articles = await conn.fetchval("SELECT COUNT(*) FROM wiki_articles")
+        await conn.execute("DELETE FROM wiki_articles")          # cascades to article_links
+        await conn.execute("DELETE FROM graph_snapshots")
+        await conn.execute("UPDATE source_documents SET status='archived'")
+        return {"articles_deleted": articles}

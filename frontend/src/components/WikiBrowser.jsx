@@ -8,6 +8,7 @@ export default function WikiBrowser({ selectedId, onSelect }) {
   const [query, setQuery] = useState('')
   const [article, setArticle] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [confirming, setConfirming] = useState(false)
 
   useEffect(() => { fetchList() }, [])
 
@@ -47,6 +48,15 @@ export default function WikiBrowser({ selectedId, onSelect }) {
     URL.revokeObjectURL(url)
   }
 
+  async function handleReset() {
+    const r = await fetch(`${API}/api/wiki`, { method: 'DELETE' })
+    if (!r.ok) return
+    setArticles([])
+    setArticle(null)
+    setConfirming(false)
+    onSelect(null)
+  }
+
   // Render [[wikilinks]] as clickable spans
   const WikilinkRenderer = useCallback(({ children }) => {
     const text = String(children)
@@ -81,6 +91,18 @@ export default function WikiBrowser({ selectedId, onSelect }) {
 
   return (
     <div className="wiki-tab">
+      {confirming && (
+        <div className="confirm-overlay">
+          <div className="confirm-dialog">
+            <h3>Delete entire wiki?</h3>
+            <p>All {articles.length} articles and the knowledge graph will be permanently deleted. Source document history is kept.</p>
+            <div className="confirm-actions">
+              <button className="btn btn-danger" onClick={handleReset}>Yes, delete wiki</button>
+              <button className="btn btn-outline" onClick={() => setConfirming(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="wiki-sidebar">
         <div className="wiki-sidebar-header">
           <input
@@ -88,6 +110,15 @@ export default function WikiBrowser({ selectedId, onSelect }) {
             value={query}
             onChange={e => setQuery(e.target.value)}
           />
+          {articles.length > 0 && (
+            <button
+              className="btn btn-danger-outline"
+              title="Delete entire wiki"
+              onClick={() => setConfirming(true)}
+            >
+              ✕
+            </button>
+          )}
         </div>
         <div className="article-list">
           {filtered.length === 0 && (

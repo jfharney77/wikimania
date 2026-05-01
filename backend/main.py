@@ -182,3 +182,13 @@ async def export_vault():
         media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=wikimania-vault.zip"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Reset
+# ---------------------------------------------------------------------------
+
+@app.delete("/api/wiki")
+async def reset_wiki():
+    result = await db.reset_wiki()
+    return {"message": f"Wiki reset. {result['articles_deleted']} articles deleted.", **result}

@@ -99,9 +99,11 @@ export default function Upload({ wikiId }) {
       }
 
       es.onerror = () => {
-        addEvent({ cls: 'ev-error', text: '✗ Connection lost.' })
-        setUploading(false)
         es.close()
+        setPhase('Processing in background...')
+        addEvent({ cls: 'ev-updated', text: '⏳ Stream disconnected — wiki is still being built on the server. Check the Wiki tab in a minute.' })
+        setUploading(false)
+        fetchDocs()
       }
     } catch (err) {
       addEvent({ cls: 'ev-error', text: `✗ ${err.message}` })

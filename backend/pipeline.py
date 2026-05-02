@@ -1,14 +1,20 @@
 import asyncio
 import json
+import os
 import re
 import tempfile
-import os
 from asyncio import Queue
 
 from fastapi import HTTPException
 
 import db
 import llm
+
+# Number of articles to write concurrently. Keep at 1 for rate-limited free tiers;
+# raise to 3-5 when using providers with generous limits (Cerebras, paid plans).
+PARALLEL_WRITES = int(os.getenv("PARALLEL_WRITES", "1"))
+# Seconds to wait between batches of article writes.
+BATCH_DELAY = int(os.getenv("BATCH_DELAY", "8"))
 
 
 def _fill(template: str, **kwargs) -> str:
@@ -96,6 +102,19 @@ def _parse_wikilinks(content: str) -> list[str]:
     return list(set(re.findall(r"\[\[([^\]]+)\]\]", content)))
 
 
+async def _call_one(wiki_id: int, title: str, content: str, related: str) -> str:
+    """LLM call for a single article — used inside parallel batches."""
+    existing = await db.get_article_content(wiki_id, title)
+    if existing:
+        system = "You are a wiki author expanding an existing article."
+        user = _fill(EXPAND_ARTICLE_PROMPT, related_titles=related, source_content=content[:6000], title=title, existing_content=existing)
+    else:
+        system = "You are a wiki author writing a new encyclopedic article."
+        user = _fill(WRITE_ARTICLE_PROMPT, related_titles=related, source_content=content[:6000], title=title)
+    raw = await llm.call_reasoning(system, user)
+    return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+
+
 async def _write_articles(
     wiki_id: int,
     job_id: int,
@@ -106,41 +125,28 @@ async def _write_articles(
     created: int = 0,
     updated: int = 0,
 ) -> tuple[int, int] | None:
-    """Write/expand articles for each concept. Returns (created, updated) on success, None if paused."""
+    """Write/expand articles in parallel batches. Returns (created, updated) or None if paused."""
     all_titles = await db.list_article_titles(wiki_id)
     related = ", ".join(all_titles[:80])
     total = len(concepts)
+    n_done = 0  # running event counter across all batches
 
-    for i, title in enumerate(concepts):
-        # Delay before each API call (except the first) to stay under Groq's TPM limit.
-        if i > 0:
-            await asyncio.sleep(8)
+    for batch_start in range(0, total, PARALLEL_WRITES):
+        if batch_start > 0:
+            await asyncio.sleep(BATCH_DELAY)
 
-        existing = await db.get_article_content(wiki_id, title)
+        batch = concepts[batch_start:batch_start + PARALLEL_WRITES]
 
-        if existing:
-            system = "You are a wiki author expanding an existing article."
-            user = _fill(
-                EXPAND_ARTICLE_PROMPT,
-                related_titles=related,
-                source_content=content[:6000],
-                title=title,
-                existing_content=existing,
-            )
-        else:
-            system = "You are a wiki author writing a new encyclopedic article."
-            user = _fill(
-                WRITE_ARTICLE_PROMPT,
-                related_titles=related,
-                source_content=content[:6000],
-                title=title,
-            )
+        results = await asyncio.gather(
+            *[_call_one(wiki_id, title, content, related) for title in batch],
+            return_exceptions=True,
+        )
 
-        try:
-            article_content = await llm.call_reasoning(system, user)
-        except HTTPException as exc:
-            if exc.status_code == 429:
-                remaining = concepts[i:]
+        for j, result in enumerate(results):
+            title = batch[j]
+
+            if isinstance(result, HTTPException) and result.status_code == 429:
+                remaining = concepts[batch_start + j:]
                 await db.save_paused_state(job_id, json.dumps({
                     "remaining_concepts": remaining,
                     "created": created,
@@ -156,26 +162,26 @@ async def _write_articles(
                     "message": f"Rate limit reached — {created} new, {updated} expanded, {len(remaining)} article(s) remaining.",
                 })
                 return None
-            raise
 
-        article_content = re.sub(r"<think>.*?</think>", "", article_content, flags=re.DOTALL).strip()
-        article_id, was_created = await db.upsert_article(wiki_id, title, article_content)
+            if isinstance(result, Exception):
+                raise result
 
-        wikilinks = _parse_wikilinks(article_content)
-        await db.replace_article_links(article_id, wikilinks)
+            article_id, was_created = await db.upsert_article(wiki_id, title, result)
+            await db.replace_article_links(article_id, _parse_wikilinks(result))
 
-        if was_created:
-            created += 1
-        else:
-            updated += 1
+            if was_created:
+                created += 1
+            else:
+                updated += 1
+            n_done += 1
 
-        await queue.put({
-            "type": "article",
-            "title": title,
-            "status": "created" if was_created else "updated",
-            "n": i + 1,
-            "total": total,
-        })
+            await queue.put({
+                "type": "article",
+                "title": title,
+                "status": "created" if was_created else "updated",
+                "n": n_done,
+                "total": total,
+            })
 
     return created, updated
 

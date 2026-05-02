@@ -5,7 +5,7 @@ import zipfile
 import io
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -82,7 +82,11 @@ async def delete_wiki(wiki_id: int):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/wikis/{wiki_id}/documents/upload")
-async def upload_document(wiki_id: int, file: UploadFile = File(...)):
+async def upload_document(
+    wiki_id: int,
+    file: UploadFile = File(...),
+    parallel_writes: int = Form(1),
+):
     wiki = await db.get_wiki(wiki_id)
     if not wiki:
         raise HTTPException(status_code=404, detail="Wiki not found.")
@@ -100,7 +104,7 @@ async def upload_document(wiki_id: int, file: UploadFile = File(...)):
     _job_queues[job_id] = queue
 
     asyncio.create_task(
-        wiki_pipeline.generate_wiki(wiki_id, job_id, doc_id, content, queue)
+        wiki_pipeline.generate_wiki(wiki_id, job_id, doc_id, content, queue, parallel_writes=parallel_writes)
     )
 
     return {"job_id": job_id, "doc_id": doc_id, "filename": file.filename}
@@ -184,6 +188,7 @@ async def resume_job(job_id: int):
             queue=queue,
             created_so_far=state["created"],
             updated_so_far=state["updated"],
+            parallel_writes=state.get("parallel_writes", 1),
         )
     )
 

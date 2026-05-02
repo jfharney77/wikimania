@@ -2,6 +2,12 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 
 const API = import.meta.env.VITE_API_URL ?? ''
 
+function formatTime(seconds) {
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
+  return `${m}:${s.toString().padStart(2, '0')}`
+}
+
 export default function Upload({ wikiId }) {
   const [file, setFile] = useState(null)
   const [dragging, setDragging] = useState(false)
@@ -12,10 +18,25 @@ export default function Upload({ wikiId }) {
   const [docs, setDocs] = useState([])
   const [paused, setPaused] = useState(false)
   const [pausedJobId, setPausedJobId] = useState(null)
+  const [parallelWrites, setParallelWrites] = useState(1)
+  const [elapsed, setElapsed] = useState(0)
   const inputRef = useRef()
   const listRef = useRef()
+  const timerRef = useRef(null)
 
   useEffect(() => { fetchDocs() }, [wikiId])
+  useEffect(() => () => clearInterval(timerRef.current), [])
+
+  function startTimer() {
+    setElapsed(0)
+    clearInterval(timerRef.current)
+    timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000)
+  }
+
+  function stopTimer() {
+    clearInterval(timerRef.current)
+    timerRef.current = null
+  }
 
   async function fetchDocs() {
     try {
@@ -47,7 +68,6 @@ export default function Upload({ wikiId }) {
 
     es.onmessage = e => {
       const ev = JSON.parse(e.data)
-
       if (ev.type === 'heartbeat') return
 
       if (ev.type === 'phase') {
@@ -68,6 +88,7 @@ export default function Upload({ wikiId }) {
       } else if (ev.type === 'warning') {
         addEvent({ cls: '', text: `⚠ ${ev.message}` })
       } else if (ev.type === 'paused') {
+        stopTimer()
         setPhase('Rate limit reached.')
         setPaused(true)
         setPausedJobId(job_id)
@@ -76,6 +97,7 @@ export default function Upload({ wikiId }) {
         fetchDocs()
         es.close()
       } else if (ev.type === 'done') {
+        stopTimer()
         setPhase('Done.')
         addEvent({ cls: 'ev-done', text: `✓ ${ev.message}` })
         setFile(null)
@@ -85,6 +107,7 @@ export default function Upload({ wikiId }) {
         fetchDocs()
         es.close()
       } else if (ev.type === 'error') {
+        stopTimer()
         setPhase('Error.')
         addEvent({ cls: 'ev-error', text: `✗ ${ev.message}` })
         setUploading(false)
@@ -94,6 +117,7 @@ export default function Upload({ wikiId }) {
     }
 
     es.onerror = () => {
+      stopTimer()
       es.close()
       setPhase('Processing in background...')
       addEvent({ cls: 'ev-updated', text: '⏳ Stream disconnected — wiki is still being built on the server. Check the Wiki tab in a minute.' })
@@ -110,10 +134,12 @@ export default function Upload({ wikiId }) {
     setProgress({ n: 0, total: 0 })
     setPaused(false)
     setPausedJobId(null)
+    startTimer()
 
     try {
       const form = new FormData()
       form.append('file', file)
+      form.append('parallel_writes', parallelWrites)
       const r = await fetch(`${API}/api/wikis/${wikiId}/documents/upload`, { method: 'POST', body: form })
       if (!r.ok) { const e = await r.json(); throw new Error(e.detail ?? 'Upload failed') }
       const { job_id } = await r.json()
@@ -124,6 +150,7 @@ export default function Upload({ wikiId }) {
 
       attachStream(job_id)
     } catch (err) {
+      stopTimer()
       addEvent({ cls: 'ev-error', text: `✗ ${err.message}` })
       setUploading(false)
     }
@@ -134,12 +161,14 @@ export default function Upload({ wikiId }) {
     setUploading(true)
     setPaused(false)
     setPhase('Resuming...')
+    startTimer()
 
     try {
       const r = await fetch(`${API}/api/jobs/${pausedJobId}/resume`, { method: 'POST' })
       if (!r.ok) { const e = await r.json(); throw new Error(e.detail ?? 'Resume failed') }
       attachStream(pausedJobId)
     } catch (err) {
+      stopTimer()
       addEvent({ cls: 'ev-error', text: `✗ ${err.message}` })
       setUploading(false)
       setPaused(true)
@@ -147,6 +176,7 @@ export default function Upload({ wikiId }) {
   }
 
   function handleDismiss() {
+    stopTimer()
     setPaused(false)
     setPausedJobId(null)
     setFile(null)
@@ -160,6 +190,7 @@ export default function Upload({ wikiId }) {
   }
 
   const pct = progress.total > 0 ? Math.round((progress.n / progress.total) * 100) : 0
+  const showTimer = uploading || paused || (elapsed > 0 && events.length > 0)
 
   return (
     <div className="upload-tab">
@@ -181,13 +212,34 @@ export default function Upload({ wikiId }) {
         }
       </div>
 
-      <button className="btn" onClick={handleUpload} disabled={!file || uploading || paused}>
-        {uploading ? <><span className="spinner" />Processing...</> : 'Upload & Generate Wiki'}
-      </button>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem' }}>
+        <button className="btn" onClick={handleUpload} disabled={!file || uploading || paused}>
+          {uploading ? <><span className="spinner" />Processing...</> : 'Upload & Generate Wiki'}
+        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--muted)' }}>
+          <label htmlFor="parallel-select">Parallel writes:</label>
+          <select
+            id="parallel-select"
+            value={parallelWrites}
+            onChange={e => setParallelWrites(Number(e.target.value))}
+            disabled={uploading}
+            style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', color: 'var(--text)', padding: '0.25rem 0.5rem', fontSize: '0.85rem' }}
+          >
+            {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+      </div>
 
       {(events.length > 0 || uploading) && (
         <div className="progress-area">
-          <div className="phase-label">{phase}</div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div className="phase-label">{phase}</div>
+            {showTimer && (
+              <div style={{ fontSize: '0.8rem', color: 'var(--muted)', fontVariantNumeric: 'tabular-nums' }}>
+                ⏱ {formatTime(elapsed)}
+              </div>
+            )}
+          </div>
           {progress.total > 0 && (
             <div className="progress-bar-track">
               <div className="progress-bar-fill" style={{ width: `${pct}%` }} />

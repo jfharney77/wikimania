@@ -124,18 +124,20 @@ async def _write_articles(
     queue: Queue,
     created: int = 0,
     updated: int = 0,
+    parallel_writes: int = 1,
 ) -> tuple[int, int] | None:
     """Write/expand articles in parallel batches. Returns (created, updated) or None if paused."""
     all_titles = await db.list_article_titles(wiki_id)
     related = ", ".join(all_titles[:80])
     total = len(concepts)
-    n_done = 0  # running event counter across all batches
+    n_done = 0
+    delay = BATCH_DELAY if parallel_writes == 1 else 2
 
-    for batch_start in range(0, total, PARALLEL_WRITES):
+    for batch_start in range(0, total, parallel_writes):
         if batch_start > 0:
-            await asyncio.sleep(BATCH_DELAY)
+            await asyncio.sleep(delay)
 
-        batch = concepts[batch_start:batch_start + PARALLEL_WRITES]
+        batch = concepts[batch_start:batch_start + parallel_writes]
 
         results = await asyncio.gather(
             *[_call_one(wiki_id, title, content, related) for title in batch],
@@ -152,6 +154,7 @@ async def _write_articles(
                     "created": created,
                     "updated": updated,
                     "doc_id": doc_id,
+                    "parallel_writes": parallel_writes,
                 }))
                 await db.set_document_status(doc_id, "paused")
                 await queue.put({
@@ -186,7 +189,7 @@ async def _write_articles(
     return created, updated
 
 
-async def generate_wiki(wiki_id: int, job_id: int, doc_id: int, content: str, queue: Queue):
+async def generate_wiki(wiki_id: int, job_id: int, doc_id: int, content: str, queue: Queue, parallel_writes: int = 1):
     try:
         await db.update_job_status(job_id, "running")
 
@@ -213,7 +216,7 @@ async def generate_wiki(wiki_id: int, job_id: int, doc_id: int, content: str, qu
 
         # Phase 2 — write / expand articles
         await queue.put({"type": "phase", "phase": 2, "message": f"Writing {len(concepts)} wiki articles..."})
-        result = await _write_articles(wiki_id, job_id, doc_id, concepts, content, queue)
+        result = await _write_articles(wiki_id, job_id, doc_id, concepts, content, queue, parallel_writes=parallel_writes)
         if result is None:
             return  # Rate limit hit — job paused, state saved
 
@@ -253,12 +256,13 @@ async def resume_wiki(
     queue: Queue,
     created_so_far: int,
     updated_so_far: int,
+    parallel_writes: int = 1,
 ):
     try:
         await db.update_job_status(job_id, "running")
         await queue.put({"type": "phase", "phase": 2, "message": f"Resuming — {len(concepts)} article(s) remaining..."})
 
-        result = await _write_articles(wiki_id, job_id, doc_id, concepts, content, queue, created_so_far, updated_so_far)
+        result = await _write_articles(wiki_id, job_id, doc_id, concepts, content, queue, created_so_far, updated_so_far, parallel_writes=parallel_writes)
         if result is None:
             return  # Rate limited again — paused state saved
 

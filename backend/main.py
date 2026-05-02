@@ -14,7 +14,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import db
-import pipeline as wiki_pipeline
+
+_use_langgraph = os.getenv("USE_LANGGRAPH", "false").lower() == "true"
+if _use_langgraph:
+    import pipeline_lg as wiki_pipeline
+else:
+    import pipeline as wiki_pipeline
 
 _job_queues: dict[int, asyncio.Queue] = {}
 

@@ -1,8 +1,11 @@
 import asyncio
+import json
 import re
 import tempfile
 import os
 from asyncio import Queue
+
+from fastapi import HTTPException
 
 import db
 import llm
@@ -93,6 +96,90 @@ def _parse_wikilinks(content: str) -> list[str]:
     return list(set(re.findall(r"\[\[([^\]]+)\]\]", content)))
 
 
+async def _write_articles(
+    wiki_id: int,
+    job_id: int,
+    doc_id: int,
+    concepts: list[str],
+    content: str,
+    queue: Queue,
+    created: int = 0,
+    updated: int = 0,
+) -> tuple[int, int] | None:
+    """Write/expand articles for each concept. Returns (created, updated) on success, None if paused."""
+    all_titles = await db.list_article_titles(wiki_id)
+    related = ", ".join(all_titles[:80])
+    total = len(concepts)
+
+    for i, title in enumerate(concepts):
+        # Delay before each API call (except the first) to stay under Groq's TPM limit.
+        if i > 0:
+            await asyncio.sleep(8)
+
+        existing = await db.get_article_content(wiki_id, title)
+
+        if existing:
+            system = "You are a wiki author expanding an existing article."
+            user = _fill(
+                EXPAND_ARTICLE_PROMPT,
+                related_titles=related,
+                source_content=content[:6000],
+                title=title,
+                existing_content=existing,
+            )
+        else:
+            system = "You are a wiki author writing a new encyclopedic article."
+            user = _fill(
+                WRITE_ARTICLE_PROMPT,
+                related_titles=related,
+                source_content=content[:6000],
+                title=title,
+            )
+
+        try:
+            article_content = await llm.call_reasoning(system, user)
+        except HTTPException as exc:
+            if exc.status_code == 429:
+                remaining = concepts[i:]
+                await db.save_paused_state(job_id, json.dumps({
+                    "remaining_concepts": remaining,
+                    "created": created,
+                    "updated": updated,
+                    "doc_id": doc_id,
+                }))
+                await db.set_document_status(doc_id, "paused")
+                await queue.put({
+                    "type": "paused",
+                    "remaining": len(remaining),
+                    "created": created,
+                    "updated": updated,
+                    "message": f"Rate limit reached — {created} new, {updated} expanded, {len(remaining)} article(s) remaining.",
+                })
+                return None
+            raise
+
+        article_content = re.sub(r"<think>.*?</think>", "", article_content, flags=re.DOTALL).strip()
+        article_id, was_created = await db.upsert_article(wiki_id, title, article_content)
+
+        wikilinks = _parse_wikilinks(article_content)
+        await db.replace_article_links(article_id, wikilinks)
+
+        if was_created:
+            created += 1
+        else:
+            updated += 1
+
+        await queue.put({
+            "type": "article",
+            "title": title,
+            "status": "created" if was_created else "updated",
+            "n": i + 1,
+            "total": total,
+        })
+
+    return created, updated
+
+
 async def generate_wiki(wiki_id: int, job_id: int, doc_id: int, content: str, queue: Queue):
     try:
         await db.update_job_status(job_id, "running")
@@ -120,62 +207,59 @@ async def generate_wiki(wiki_id: int, job_id: int, doc_id: int, content: str, qu
 
         # Phase 2 — write / expand articles
         await queue.put({"type": "phase", "phase": 2, "message": f"Writing {len(concepts)} wiki articles..."})
-        all_titles = await db.list_article_titles(wiki_id)
-        related = ", ".join(all_titles[:80])
+        result = await _write_articles(wiki_id, job_id, doc_id, concepts, content, queue)
+        if result is None:
+            return  # Rate limit hit — job paused, state saved
 
-        created = 0
-        updated = 0
-
-        for i, title in enumerate(concepts):
-            existing = await db.get_article_content(wiki_id, title)
-
-            if existing:
-                system = "You are a wiki author expanding an existing article."
-                user = _fill(
-                    EXPAND_ARTICLE_PROMPT,
-                    related_titles=related,
-                    source_content=content[:6000],
-                    title=title,
-                    existing_content=existing,
-                )
-            else:
-                system = "You are a wiki author writing a new encyclopedic article."
-                user = _fill(
-                    WRITE_ARTICLE_PROMPT,
-                    related_titles=related,
-                    source_content=content[:6000],
-                    title=title,
-                )
-
-            article_content = await llm.call_reasoning(system, user)
-            article_content = re.sub(r"<think>.*?</think>", "", article_content, flags=re.DOTALL).strip()
-
-            # Brief pause between articles to stay within Groq's 6000 TPM limit.
-            if i > 0:
-                await asyncio.sleep(3)
-
-            article_id, was_created = await db.upsert_article(wiki_id, title, article_content)
-
-            wikilinks = _parse_wikilinks(article_content)
-            await db.replace_article_links(article_id, wikilinks)
-
-            if was_created:
-                created += 1
-            else:
-                updated += 1
-
-            await queue.put({
-                "type": "article",
-                "title": title,
-                "status": "created" if was_created else "updated",
-                "n": i + 1,
-                "total": len(concepts),
-            })
+        created, updated = result
 
         # Phase 2b — stubs for dangling wikilinks
         stubs = await _create_stubs(wiki_id, queue)
 
         # Phase 3 — rebuild knowledge graph
+        await queue.put({"type": "phase", "phase": 3, "message": "Rebuilding knowledge graph..."})
+        await _rebuild_graph(wiki_id)
+        await queue.put({"type": "graph_done", "message": "Knowledge graph updated."})
+
+        await db.update_job_status(job_id, "done")
+        await db.set_document_status(doc_id, "done")
+        await queue.put({
+            "type": "done",
+            "articles_created": created,
+            "articles_updated": updated,
+            "stubs_created": stubs,
+            "message": f"Wiki updated — {created} new, {updated} expanded, {stubs} stubs.",
+        })
+
+    except Exception as exc:
+        err = str(exc)
+        await db.update_job_status(job_id, "error", error=err)
+        await db.set_document_status(doc_id, "error")
+        await queue.put({"type": "error", "message": err})
+
+
+async def resume_wiki(
+    wiki_id: int,
+    job_id: int,
+    doc_id: int,
+    concepts: list[str],
+    content: str,
+    queue: Queue,
+    created_so_far: int,
+    updated_so_far: int,
+):
+    try:
+        await db.update_job_status(job_id, "running")
+        await queue.put({"type": "phase", "phase": 2, "message": f"Resuming — {len(concepts)} article(s) remaining..."})
+
+        result = await _write_articles(wiki_id, job_id, doc_id, concepts, content, queue, created_so_far, updated_so_far)
+        if result is None:
+            return  # Rate limited again — paused state saved
+
+        created, updated = result
+
+        stubs = await _create_stubs(wiki_id, queue)
+
         await queue.put({"type": "phase", "phase": 3, "message": "Rebuilding knowledge graph..."})
         await _rebuild_graph(wiki_id)
         await queue.put({"type": "graph_done", "message": "Knowledge graph updated."})

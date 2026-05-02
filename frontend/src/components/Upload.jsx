@@ -10,6 +10,8 @@ export default function Upload({ wikiId }) {
   const [phase, setPhase] = useState('')
   const [progress, setProgress] = useState({ n: 0, total: 0 })
   const [docs, setDocs] = useState([])
+  const [paused, setPaused] = useState(false)
+  const [pausedJobId, setPausedJobId] = useState(null)
   const inputRef = useRef()
   const listRef = useRef()
 
@@ -40,12 +42,74 @@ export default function Upload({ wikiId }) {
     setTimeout(() => listRef.current?.scrollTo(0, listRef.current.scrollHeight), 50)
   }
 
+  function attachStream(job_id) {
+    const es = new EventSource(`${API}/api/jobs/${job_id}/stream`)
+
+    es.onmessage = e => {
+      const ev = JSON.parse(e.data)
+
+      if (ev.type === 'heartbeat') return
+
+      if (ev.type === 'phase') {
+        setPhase(ev.message)
+        addEvent({ cls: '', text: `▶ ${ev.message}` })
+      } else if (ev.type === 'concepts') {
+        addEvent({ cls: '', text: `Found ${ev.count} concept(s): ${ev.titles.slice(0, 5).join(', ')}${ev.count > 5 ? '...' : ''}` })
+        setProgress({ n: 0, total: ev.count })
+      } else if (ev.type === 'article') {
+        setProgress(p => ({ ...p, n: ev.n }))
+        addEvent({ cls: `ev-${ev.status}`, text: `  ${ev.status === 'created' ? '✦' : '↺'} ${ev.title}` })
+      } else if (ev.type === 'stub') {
+        addEvent({ cls: 'ev-updated', text: `  ○ stub: ${ev.title}` })
+      } else if (ev.type === 'graph_done') {
+        setPhase('Graph rebuilt.')
+        addEvent({ cls: 'ev-done', text: '⬡ Knowledge graph updated.' })
+        notify('Wikimania', 'Knowledge graph has been rebuilt.')
+      } else if (ev.type === 'warning') {
+        addEvent({ cls: '', text: `⚠ ${ev.message}` })
+      } else if (ev.type === 'paused') {
+        setPhase('Rate limit reached.')
+        setPaused(true)
+        setPausedJobId(job_id)
+        addEvent({ cls: 'ev-updated', text: `⏸ ${ev.message}` })
+        setUploading(false)
+        fetchDocs()
+        es.close()
+      } else if (ev.type === 'done') {
+        setPhase('Done.')
+        addEvent({ cls: 'ev-done', text: `✓ ${ev.message}` })
+        setFile(null)
+        setPaused(false)
+        setPausedJobId(null)
+        setUploading(false)
+        fetchDocs()
+        es.close()
+      } else if (ev.type === 'error') {
+        setPhase('Error.')
+        addEvent({ cls: 'ev-error', text: `✗ ${ev.message}` })
+        setUploading(false)
+        fetchDocs()
+        es.close()
+      }
+    }
+
+    es.onerror = () => {
+      es.close()
+      setPhase('Processing in background...')
+      addEvent({ cls: 'ev-updated', text: '⏳ Stream disconnected — wiki is still being built on the server. Check the Wiki tab in a minute.' })
+      setUploading(false)
+      fetchDocs()
+    }
+  }
+
   async function handleUpload() {
     if (!file || uploading) return
     setUploading(true)
     setEvents([])
     setPhase('Uploading...')
     setProgress({ n: 0, total: 0 })
+    setPaused(false)
+    setPausedJobId(null)
 
     try {
       const form = new FormData()
@@ -58,57 +122,35 @@ export default function Upload({ wikiId }) {
         Notification.requestPermission()
       }
 
-      const es = new EventSource(`${API}/api/jobs/${job_id}/stream`)
-
-      es.onmessage = e => {
-        const ev = JSON.parse(e.data)
-
-        if (ev.type === 'heartbeat') return
-
-        if (ev.type === 'phase') {
-          setPhase(ev.message)
-          addEvent({ cls: '', text: `▶ ${ev.message}` })
-        } else if (ev.type === 'concepts') {
-          addEvent({ cls: '', text: `Found ${ev.count} concept(s): ${ev.titles.slice(0, 5).join(', ')}${ev.count > 5 ? '...' : ''}` })
-          setProgress({ n: 0, total: ev.count })
-        } else if (ev.type === 'article') {
-          setProgress(p => ({ ...p, n: ev.n }))
-          addEvent({ cls: `ev-${ev.status}`, text: `  ${ev.status === 'created' ? '✦' : '↺'} ${ev.title}` })
-        } else if (ev.type === 'stub') {
-          addEvent({ cls: 'ev-updated', text: `  ○ stub: ${ev.title}` })
-        } else if (ev.type === 'graph_done') {
-          setPhase('Graph rebuilt.')
-          addEvent({ cls: 'ev-done', text: '⬡ Knowledge graph updated.' })
-          notify('Wikimania', 'Knowledge graph has been rebuilt.')
-        } else if (ev.type === 'warning') {
-          addEvent({ cls: '', text: `⚠ ${ev.message}` })
-        } else if (ev.type === 'done') {
-          setPhase('Done.')
-          addEvent({ cls: 'ev-done', text: `✓ ${ev.message}` })
-          setFile(null)
-          setUploading(false)
-          fetchDocs()
-          es.close()
-        } else if (ev.type === 'error') {
-          setPhase('Error.')
-          addEvent({ cls: 'ev-error', text: `✗ ${ev.message}` })
-          setUploading(false)
-          fetchDocs()
-          es.close()
-        }
-      }
-
-      es.onerror = () => {
-        es.close()
-        setPhase('Processing in background...')
-        addEvent({ cls: 'ev-updated', text: '⏳ Stream disconnected — wiki is still being built on the server. Check the Wiki tab in a minute.' })
-        setUploading(false)
-        fetchDocs()
-      }
+      attachStream(job_id)
     } catch (err) {
       addEvent({ cls: 'ev-error', text: `✗ ${err.message}` })
       setUploading(false)
     }
+  }
+
+  async function handleResume() {
+    if (!pausedJobId || uploading) return
+    setUploading(true)
+    setPaused(false)
+    setPhase('Resuming...')
+
+    try {
+      const r = await fetch(`${API}/api/jobs/${pausedJobId}/resume`, { method: 'POST' })
+      if (!r.ok) { const e = await r.json(); throw new Error(e.detail ?? 'Resume failed') }
+      attachStream(pausedJobId)
+    } catch (err) {
+      addEvent({ cls: 'ev-error', text: `✗ ${err.message}` })
+      setUploading(false)
+      setPaused(true)
+    }
+  }
+
+  function handleDismiss() {
+    setPaused(false)
+    setPausedJobId(null)
+    setFile(null)
+    setUploading(false)
   }
 
   function notify(title, body) {
@@ -139,7 +181,7 @@ export default function Upload({ wikiId }) {
         }
       </div>
 
-      <button className="btn" onClick={handleUpload} disabled={!file || uploading}>
+      <button className="btn" onClick={handleUpload} disabled={!file || uploading || paused}>
         {uploading ? <><span className="spinner" />Processing...</> : 'Upload & Generate Wiki'}
       </button>
 
@@ -156,6 +198,13 @@ export default function Upload({ wikiId }) {
               <li key={i} className={ev.cls}>{ev.text}</li>
             ))}
           </ul>
+
+          {paused && (
+            <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
+              <button className="btn" onClick={handleResume}>Resume</button>
+              <button className="btn btn-outline" onClick={handleDismiss}>Dismiss</button>
+            </div>
+          )}
         </div>
       )}
 

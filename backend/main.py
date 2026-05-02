@@ -160,6 +160,36 @@ async def get_job(job_id: int):
     return job
 
 
+@app.post("/api/jobs/{job_id}/resume")
+async def resume_job(job_id: int):
+    job = await db.get_job(job_id)
+    if not job or job["status"] != "paused":
+        raise HTTPException(status_code=400, detail="Job is not paused.")
+
+    state = json.loads(job["paused_state"])
+    doc = await db.get_document(state["doc_id"])
+    if not doc:
+        raise HTTPException(status_code=404, detail="Source document not found.")
+
+    queue: asyncio.Queue = asyncio.Queue()
+    _job_queues[job_id] = queue
+
+    asyncio.create_task(
+        wiki_pipeline.resume_wiki(
+            wiki_id=job["wiki_id"],
+            job_id=job_id,
+            doc_id=state["doc_id"],
+            concepts=state["remaining_concepts"],
+            content=doc["content"],
+            queue=queue,
+            created_so_far=state["created"],
+            updated_so_far=state["updated"],
+        )
+    )
+
+    return {"job_id": job_id}
+
+
 # ---------------------------------------------------------------------------
 # Wiki articles
 # ---------------------------------------------------------------------------

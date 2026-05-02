@@ -164,6 +164,7 @@ body { background: var(--bg); color: var(--text); min-height: 100vh; }
 .status-done { background: rgba(74,222,128,0.15); color: var(--green); }
 .status-pending { background: rgba(250,204,21,0.15); color: var(--yellow); }
 .status-error { background: rgba(248,113,113,0.15); color: var(--red); }
+.status-paused { background: rgba(251,146,60,0.15); color: #fb923c; }
 
 /* Wiki browser tab */
 .wiki-tab { display: flex; width: 100%; overflow: hidden; }

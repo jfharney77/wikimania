@@ -65,6 +65,11 @@ async def init_pool(database_url: str):
             )
         """)
 
+        # Migration: add paused_state to generation_jobs
+        await conn.execute("""
+            ALTER TABLE generation_jobs ADD COLUMN IF NOT EXISTS paused_state TEXT
+        """)
+
         # Migration: add wiki_id to tables created before this feature
         for table in ('source_documents', 'wiki_articles', 'generation_jobs', 'graph_snapshots'):
             await conn.execute(f"""
@@ -161,6 +166,14 @@ async def set_document_status(doc_id: int, status: str):
         )
 
 
+async def get_document(doc_id: int) -> dict | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, filename, content FROM source_documents WHERE id=$1", doc_id
+        )
+        return dict(row) if row else None
+
+
 async def list_documents(wiki_id: int) -> list[dict]:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
@@ -181,6 +194,14 @@ async def create_job(wiki_id: int, doc_id: int) -> int:
             wiki_id, doc_id,
         )
         return row["id"]
+
+
+async def save_paused_state(job_id: int, state_json: str):
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE generation_jobs SET status='paused', paused_state=$1 WHERE id=$2",
+            state_json, job_id,
+        )
 
 
 async def update_job_status(job_id: int, status: str, error: str | None = None):

@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
     # Railway emits postgres:// but asyncpg requires postgresql://
     if database_url.startswith("postgres://"):
         database_url = "postgresql://" + database_url[len("postgres://"):]
-    await db.init_pool(database_url)
+    await asyncio.wait_for(db.init_pool(database_url), timeout=30)
     yield
     await db.close_pool()
 
@@ -51,6 +51,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 
 # ---------------------------------------------------------------------------

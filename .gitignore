@@ -7,6 +7,7 @@ __pycache__/
 # Env
 .env
 .env.local
+scripts/deploy.env
 
 # Node
 node_modules/

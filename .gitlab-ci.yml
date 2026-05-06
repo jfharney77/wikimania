@@ -29,7 +29,7 @@ build-backend:
     - docker push $REPO:$CI_COMMIT_SHA
     - docker push $REPO:latest
   rules:
-    - if: $CI_COMMIT_BRANCH == "aws-deployment"
+    - if: $CI_COMMIT_BRANCH == "aws-clean-deploy"
 
 build-frontend:
   extends: .docker-ecr-setup
@@ -41,7 +41,7 @@ build-frontend:
     - docker push $REPO:$CI_COMMIT_SHA
     - docker push $REPO:latest
   rules:
-    - if: $CI_COMMIT_BRANCH == "aws-deployment"
+    - if: $CI_COMMIT_BRANCH == "aws-clean-deploy"
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
 deploy-backend:
@@ -65,7 +65,7 @@ deploy-backend:
         ]}" \
         --region $AWS_REGION
   rules:
-    - if: $CI_COMMIT_BRANCH == "aws-deployment"
+    - if: $CI_COMMIT_BRANCH == "aws-clean-deploy"
 
 deploy-frontend:
   stage: deploy
@@ -81,4 +81,4 @@ deploy-frontend:
         --primary-container "{\"image\":\"$IMAGE\",\"containerPort\":8080}" \
         --region $AWS_REGION
   rules:
-    - if: $CI_COMMIT_BRANCH == "aws-deployment"
+    - if: $CI_COMMIT_BRANCH == "aws-clean-deploy"

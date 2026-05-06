@@ -1,0 +1,84 @@
+stages:
+  - build
+  - deploy
+
+# ── Shared Docker + ECR setup ─────────────────────────────────────────────────
+.docker-ecr-setup:
+  image: python:3.12-slim
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_VERIFY: 1
+    DOCKER_CERT_PATH: "$DOCKER_TLS_CERTDIR/client"
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq docker.io
+    - pip install awscli -q
+    - aws ecr get-login-password --region $AWS_REGION
+      | docker login --username AWS --password-stdin
+        $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+build-backend:
+  extends: .docker-ecr-setup
+  stage: build
+  script:
+    - REPO=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/wikimania-backend
+    - docker build -t $REPO:$CI_COMMIT_SHA -t $REPO:latest ./backend
+    - docker push $REPO:$CI_COMMIT_SHA
+    - docker push $REPO:latest
+  rules:
+    - if: $CI_COMMIT_BRANCH == "aws-deployment"
+
+build-frontend:
+  extends: .docker-ecr-setup
+  stage: build
+  script:
+    - REPO=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/wikimania-frontend
+    - docker build --build-arg VITE_API_URL=$BACKEND_URL
+        -t $REPO:$CI_COMMIT_SHA -t $REPO:latest ./frontend
+    - docker push $REPO:$CI_COMMIT_SHA
+    - docker push $REPO:latest
+  rules:
+    - if: $CI_COMMIT_BRANCH == "aws-deployment"
+
+# ── Deploy ────────────────────────────────────────────────────────────────────
+deploy-backend:
+  stage: deploy
+  image:
+    name: amazon/aws-cli
+    entrypoint: [""]
+  needs: [build-backend]
+  script:
+    - IMAGE=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/wikimania-backend:$CI_COMMIT_SHA
+    - |
+      aws ecs update-express-gateway-service \
+        --service-arn $BACKEND_SERVICE_ARN \
+        --primary-container "{\"image\":\"$IMAGE\",\"containerPort\":8080,\"environment\":[
+          {\"name\":\"DATABASE_URL\",\"value\":\"$DATABASE_URL\"},
+          {\"name\":\"PROVIDER\",\"value\":\"cerebras\"},
+          {\"name\":\"MODEL_FAST\",\"value\":\"llama3.1-8b\"},
+          {\"name\":\"MODEL_REASONING\",\"value\":\"llama-3.3-70b\"},
+          {\"name\":\"API_KEY\",\"value\":\"$CEREBRAS_API_KEY\"},
+          {\"name\":\"CORS_ORIGINS\",\"value\":\"$FRONTEND_URL\"}
+        ]}" \
+        --region $AWS_REGION
+  rules:
+    - if: $CI_COMMIT_BRANCH == "aws-deployment"
+
+deploy-frontend:
+  stage: deploy
+  image:
+    name: amazon/aws-cli
+    entrypoint: [""]
+  needs: [build-frontend]
+  script:
+    - IMAGE=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/wikimania-frontend:$CI_COMMIT_SHA
+    - |
+      aws ecs update-express-gateway-service \
+        --service-arn $FRONTEND_SERVICE_ARN \
+        --primary-container "{\"image\":\"$IMAGE\",\"containerPort\":8080}" \
+        --region $AWS_REGION
+  rules:
+    - if: $CI_COMMIT_BRANCH == "aws-deployment"

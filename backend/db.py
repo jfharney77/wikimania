@@ -1,7 +1,6 @@
 import asyncpg
 import os
 import re
-import ssl as _ssl
 
 _pool: asyncpg.Pool | None = None
 
@@ -9,8 +8,8 @@ _pool: asyncpg.Pool | None = None
 async def init_pool(database_url: str):
     global _pool
     is_local = any(h in database_url for h in ("localhost", "127.0.0.1"))
-    ssl_ctx = None if is_local else _ssl.create_default_context()
-    _pool = await asyncpg.create_pool(database_url, min_size=1, max_size=10, ssl=ssl_ctx)
+    ssl = None if is_local else "require"
+    _pool = await asyncpg.create_pool(database_url, min_size=1, max_size=10, ssl=ssl)
     async with _pool.acquire() as conn:
         # Core tables
         await conn.execute("""

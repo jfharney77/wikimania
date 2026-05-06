@@ -59,7 +59,7 @@ deploy-backend:
           {\"name\":\"DATABASE_URL\",\"value\":\"$DATABASE_URL\"},
           {\"name\":\"PROVIDER\",\"value\":\"cerebras\"},
           {\"name\":\"MODEL_FAST\",\"value\":\"llama3.1-8b\"},
-          {\"name\":\"MODEL_REASONING\",\"value\":\"llama-3.3-70b\"},
+          {\"name\":\"MODEL_REASONING\",\"value\":\"gpt-oss-120b\"},
           {\"name\":\"API_KEY\",\"value\":\"$CEREBRAS_API_KEY\"},
           {\"name\":\"CORS_ORIGINS\",\"value\":\"$FRONTEND_URL\"}
         ]}" \

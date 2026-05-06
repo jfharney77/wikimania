@@ -5,9 +5,9 @@ import json
 import re
 from fastapi import HTTPException
 
-PROVIDER = os.getenv("PROVIDER", "groq")
-MODEL_FAST = os.getenv("MODEL_FAST", "llama-3.1-8b-instant")
-MODEL_REASONING = os.getenv("MODEL_REASONING", "llama-3.3-70b-versatile")
+PROVIDER = os.getenv("PROVIDER", "cerebras")
+MODEL_FAST = os.getenv("MODEL_FAST", "llama3.1-8b")
+MODEL_REASONING = os.getenv("MODEL_REASONING", "gpt-oss-120b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 # Unified API key — falls back to GROQ_API_KEY for backward compatibility.

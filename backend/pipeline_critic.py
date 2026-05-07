@@ -83,20 +83,24 @@ async def run_critic(wiki_id: int, job_id: int, queue: Queue):
         await queue.put({"type": "phase", "message": f"Scanning {len(articles)} articles for duplicates..."})
 
         titles_str = "\n".join(f"- {a['title']}" for a in articles)
+        await queue.put({"type": "progress", "message": "Analyzing titles with reasoning model..."})
         raw = await llm.call_reasoning(
             "You are a wiki editor identifying duplicate articles.",
             FIND_DUPLICATES_PROMPT.replace("{titles}", titles_str),
         )
         groups = _parse_json_list(raw)
 
+        real_groups = [g for g in groups if isinstance(g, list) and len(g) >= 2 and len([a for a in articles if a["title"] in g]) >= 2]
+        if real_groups:
+            await queue.put({"type": "progress", "message": f"Found {len(real_groups)} duplicate group(s) to merge..."})
+        else:
+            await queue.put({"type": "progress", "message": "No duplicates found."})
+
         duplicates_removed = 0
-        for group in groups:
-            if not isinstance(group, list) or len(group) < 2:
-                continue
+        for group in real_groups:
             group_articles = [a for a in articles if a["title"] in group]
-            if len(group_articles) < 2:
-                continue
             primary = group_articles[0]
+            await queue.put({"type": "progress", "message": f'Merging "{primary["title"]}"...'})
             articles_text = "\n\n---\n\n".join(
                 f"## {a['title']}\n{a['content']}" for a in group_articles
             )
@@ -120,8 +124,11 @@ async def run_critic(wiki_id: int, job_id: int, queue: Queue):
 
         contradictions_fixed = 0
         BATCH = 12
+        total_batches = (len(articles) + BATCH - 1) // BATCH
         for i in range(0, len(articles), BATCH):
             batch = articles[i:i + BATCH]
+            batch_num = i // BATCH + 1
+            await queue.put({"type": "progress", "message": f"Checking batch {batch_num}/{total_batches} ({len(batch)} articles)..."})
             articles_text = "\n\n---\n\n".join(
                 f"## {a['title']}\n{a['content'][:800]}" for a in batch
             )
@@ -136,6 +143,7 @@ async def run_critic(wiki_id: int, job_id: int, queue: Queue):
                 article = next((a for a in batch if a["title"] == issue.get("article")), None)
                 if not article:
                     continue
+                await queue.put({"type": "progress", "message": f'Fixing "{article["title"]}"...'})
                 fixed = await llm.call_reasoning(
                     "You are a wiki editor fixing a factual error.",
                     FIX_CONTRADICTION_PROMPT

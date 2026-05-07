@@ -84,6 +84,9 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
         if (ev.type === 'phase') {
           setCriticPhase(ev.message)
           addCriticEvent({ cls: '', text: `▶ ${ev.message}` })
+        } else if (ev.type === 'progress') {
+          setCriticPhase(ev.message)
+          addCriticEvent({ cls: 'ev-progress', text: `  ${ev.message}` })
         } else if (ev.type === 'duplicate') {
           addCriticEvent({ cls: 'ev-updated', text: `  ↪ Merged "${ev.title}" → "${ev.merged_into}"` })
         } else if (ev.type === 'contradiction') {

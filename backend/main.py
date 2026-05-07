@@ -21,6 +21,8 @@ if _use_langgraph:
 else:
     import pipeline as wiki_pipeline
 
+import pipeline_critic as _critic_pipeline
+
 _job_queues: dict[int, asyncio.Queue] = {}
 
 
@@ -273,6 +275,33 @@ async def export_vault(wiki_id: int):
         media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename={safe_name}-vault.zip"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Critic agent
+# ---------------------------------------------------------------------------
+
+@app.post("/api/wikis/{wiki_id}/critic")
+async def start_critic(wiki_id: int):
+    wiki = await db.get_wiki(wiki_id)
+    if not wiki:
+        raise HTTPException(status_code=404, detail="Wiki not found.")
+    job_id = await db.create_job(wiki_id)
+    queue: asyncio.Queue = asyncio.Queue()
+    _job_queues[job_id] = queue
+    asyncio.create_task(_run_critic_task(wiki_id, job_id, queue))
+    return {"job_id": job_id}
+
+
+async def _run_critic_task(wiki_id: int, job_id: int, queue: asyncio.Queue):
+    try:
+        await _critic_pipeline.run_critic(wiki_id, job_id, queue)
+    except Exception as e:
+        await queue.put({"type": "error", "message": str(e)})
+        await db.update_job_status(job_id, "error", str(e))
+    finally:
+        await asyncio.sleep(300)
+        _job_queues.pop(job_id, None)
 
 
 # ---------------------------------------------------------------------------

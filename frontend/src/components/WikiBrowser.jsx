@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 
 const API = import.meta.env.VITE_API_URL ?? ''
@@ -9,6 +9,11 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
   const [article, setArticle] = useState(null)
   const [loading, setLoading] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  const [criticRunning, setCriticRunning] = useState(false)
+  const [criticEvents, setCriticEvents] = useState([])
+  const [criticPhase, setCriticPhase] = useState('')
+  const [showCritic, setShowCritic] = useState(false)
+  const criticListRef = useRef()
 
   useEffect(() => { setArticle(null); setQuery(''); fetchList() }, [wikiId])
 
@@ -56,6 +61,51 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
     setArticle(null)
     setConfirming(false)
     onSelect(null)
+  }
+
+  function addCriticEvent(ev) {
+    setCriticEvents(prev => [...prev, ev])
+    setTimeout(() => criticListRef.current?.scrollTo(0, criticListRef.current.scrollHeight), 50)
+  }
+
+  async function handleRunCritic() {
+    setCriticRunning(true)
+    setCriticEvents([])
+    setCriticPhase('Starting critic...')
+    setShowCritic(true)
+    try {
+      const r = await fetch(`${API}/api/wikis/${wikiId}/critic`, { method: 'POST' })
+      if (!r.ok) { const e = await r.json(); throw new Error(e.detail ?? 'Failed') }
+      const { job_id } = await r.json()
+      const es = new EventSource(`${API}/api/jobs/${job_id}/stream`)
+      es.onmessage = e => {
+        const ev = JSON.parse(e.data)
+        if (ev.type === 'heartbeat') return
+        if (ev.type === 'phase') {
+          setCriticPhase(ev.message)
+          addCriticEvent({ cls: '', text: `▶ ${ev.message}` })
+        } else if (ev.type === 'duplicate') {
+          addCriticEvent({ cls: 'ev-updated', text: `  ↪ Merged "${ev.title}" → "${ev.merged_into}"` })
+        } else if (ev.type === 'contradiction') {
+          addCriticEvent({ cls: 'ev-updated', text: `  ✎ Fixed contradiction in "${ev.title}": ${ev.issue}` })
+        } else if (ev.type === 'done') {
+          setCriticPhase('Done.')
+          addCriticEvent({ cls: 'ev-done', text: `✓ ${ev.message}` })
+          setCriticRunning(false)
+          fetchList()
+          es.close()
+        } else if (ev.type === 'error') {
+          setCriticPhase('Error.')
+          addCriticEvent({ cls: 'ev-error', text: `✗ ${ev.message}` })
+          setCriticRunning(false)
+          es.close()
+        }
+      }
+      es.onerror = () => { setCriticRunning(false); es.close() }
+    } catch (err) {
+      addCriticEvent({ cls: 'ev-error', text: `✗ ${err.message}` })
+      setCriticRunning(false)
+    }
   }
 
   const WikilinkRenderer = useCallback(({ children }) => {
@@ -113,6 +163,17 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
           />
           {articles.length > 0 && (
             <button
+              className="btn btn-outline"
+              style={{ fontSize: '0.8rem', padding: '0.25rem 0.6rem' }}
+              onClick={handleRunCritic}
+              disabled={criticRunning}
+              title="Run critic agent to find duplicates and contradictions"
+            >
+              {criticRunning ? <><span className="spinner" /> Critic...</> : '⚡ Critic'}
+            </button>
+          )}
+          {articles.length > 0 && (
+            <button
               className="btn-danger-outline"
               title="Reset wiki content"
               onClick={() => setConfirming(true)}
@@ -137,6 +198,24 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
             </div>
           ))}
         </div>
+        {showCritic && (
+          <div className="critic-panel">
+            <div className="critic-panel-header">
+              <span className="phase-label">{criticPhase}</span>
+              <button
+                className="btn-danger-outline"
+                onClick={() => { if (!criticRunning) setShowCritic(false) }}
+                title="Close"
+                disabled={criticRunning}
+              >✕</button>
+            </div>
+            <ul className="critic-event-list" ref={criticListRef}>
+              {criticEvents.map((ev, i) => (
+                <li key={i} className={ev.cls}>{ev.text}</li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
 
       <div className="wiki-reader">

@@ -189,7 +189,7 @@ async def list_documents(wiki_id: int) -> list[dict]:
 # Jobs
 # ---------------------------------------------------------------------------
 
-async def create_job(wiki_id: int, doc_id: int) -> int:
+async def create_job(wiki_id: int, doc_id: int | None = None) -> int:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "INSERT INTO generation_jobs (wiki_id, doc_id) VALUES ($1, $2) RETURNING id",
@@ -273,6 +273,13 @@ async def get_article_by_id(article_id: int) -> dict | None:
             article_id,
         )
         return dict(row) if row else None
+
+
+async def delete_article_by_title(wiki_id: int, title: str):
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "DELETE FROM wiki_articles WHERE wiki_id=$1 AND title=$2", wiki_id, title
+        )
 
 
 async def get_all_articles(wiki_id: int) -> list[dict]:

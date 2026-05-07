@@ -183,6 +183,15 @@ body { background: var(--bg); color: var(--text); min-height: 100vh; }
 .wiki-meta { font-size: 0.8rem; color: var(--muted); margin-bottom: 1.5rem; }
 .wiki-export-btn { margin-top: 1rem; }
 
+.critic-panel { border-top: 1px solid var(--border); padding: 0.6rem 0.75rem; background: var(--surface); max-height: 200px; overflow: hidden; display: flex; flex-direction: column; gap: 0.4rem; flex-shrink: 0; }
+.critic-panel-header { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+.phase-label { font-size: 0.78rem; color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.critic-event-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 1px; }
+.critic-event-list li { font-size: 0.78rem; font-family: monospace; padding: 1px 0; white-space: pre-wrap; word-break: break-word; }
+.critic-event-list li.ev-updated { color: var(--accent); }
+.critic-event-list li.ev-done { color: #4caf50; }
+.critic-event-list li.ev-error { color: #e57373; }
+
 /* Markdown rendering */
 .markdown { line-height: 1.7; font-size: 0.95rem; }
 .markdown h1, .markdown h2, .markdown h3 { margin: 1.5rem 0 0.5rem; line-height: 1.3; }

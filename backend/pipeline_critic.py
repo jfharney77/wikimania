@@ -6,14 +6,16 @@ import db
 import llm
 
 FIND_DUPLICATES_PROMPT = """\
-You are reviewing a wiki knowledge base. Given the following list of article titles, identify groups of titles that represent the SAME concept and should be merged into one article.
+You are reviewing a wiki knowledge base. Given the following list of article titles, identify groups of titles that cover the same topic and should be merged into one article.
+
+Be liberal: merge titles that are the same concept under different names, abbreviations, acronyms, or phrasings (e.g. "Faster R-CNN" and "Faster RCNN", "ML" and "Machine Learning", "Object Detection Overview" and "Object Detection").
 
 Article titles:
 {titles}
 
-Return ONLY a JSON array of arrays, where each inner array contains titles that are duplicates of each other.
+Return ONLY a JSON array of arrays, where each inner array contains titles that should be merged.
 Return [] if no duplicates are found.
-Example: [["Machine Learning", "ML Overview"], ["Neural Net", "Neural Network"]]
+Example: [["Machine Learning", "ML Overview"], ["Faster R-CNN", "Faster RCNN", "Faster R-CNN Overview"]]
 No explanation, no markdown fences."""
 
 MERGE_ARTICLES_PROMPT = """\
@@ -81,7 +83,10 @@ async def run_critic(wiki_id: int, job_id: int, queue: Queue):
         await queue.put({"type": "phase", "message": f"Scanning {len(articles)} articles for duplicates..."})
 
         titles_str = "\n".join(f"- {a['title']}" for a in articles)
-        raw = await llm.call_fast(FIND_DUPLICATES_PROMPT.replace("{titles}", titles_str))
+        raw = await llm.call_reasoning(
+            "You are a wiki editor identifying duplicate articles.",
+            FIND_DUPLICATES_PROMPT.replace("{titles}", titles_str),
+        )
         groups = _parse_json_list(raw)
 
         duplicates_removed = 0

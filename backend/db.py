@@ -72,6 +72,17 @@ async def init_pool(database_url: str):
             ALTER TABLE generation_jobs ADD COLUMN IF NOT EXISTS paused_state TEXT
         """)
 
+        # Users (auth)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id            SERIAL PRIMARY KEY,
+                username      TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role          TEXT NOT NULL DEFAULT 'user',
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+
         # Migration: add wiki_id to tables created before this feature
         for table in ('source_documents', 'wiki_articles', 'generation_jobs', 'graph_snapshots'):
             await conn.execute(f"""
@@ -108,6 +119,60 @@ async def close_pool():
 def get_pool() -> asyncpg.Pool:
     assert _pool is not None, "DB pool not initialised"
     return _pool
+
+
+# ---------------------------------------------------------------------------
+# Users
+# ---------------------------------------------------------------------------
+
+async def create_user(username: str, password_hash: str, role: str = "user") -> dict:
+    async with get_pool().acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                "INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) "
+                "RETURNING id, username, role, created_at",
+                username, password_hash, role,
+            )
+            return dict(row)
+        except asyncpg.UniqueViolationError:
+            raise ValueError(f"Username '{username}' is already taken.")
+
+
+async def get_user_by_username(username: str) -> dict | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, username, password_hash, role, created_at FROM users WHERE username=$1",
+            username,
+        )
+        return dict(row) if row else None
+
+
+async def list_users() -> list[dict]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, username, role, created_at FROM users ORDER BY created_at"
+        )
+        return [dict(r) for r in rows]
+
+
+async def update_user_role(user_id: int, role: str) -> dict | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE users SET role=$1 WHERE id=$2 RETURNING id, username, role, created_at",
+            role, user_id,
+        )
+        return dict(row) if row else None
+
+
+async def delete_user(user_id: int) -> bool:
+    async with get_pool().acquire() as conn:
+        result = await conn.execute("DELETE FROM users WHERE id=$1", user_id)
+        return result == "DELETE 1"
+
+
+async def count_users() -> int:
+    async with get_pool().acquire() as conn:
+        return await conn.fetchval("SELECT COUNT(*) FROM users")
 
 
 # ---------------------------------------------------------------------------

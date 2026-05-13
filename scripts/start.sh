@@ -15,7 +15,7 @@ if [ ! -d .venv ]; then
   python3 -m venv .venv
   .venv/bin/pip install -r requirements.txt -q
 fi
-.venv/bin/uvicorn main:app --reload --port 8000 &
+.venv/bin/uvicorn main:app --reload --port 8001 &
 echo $! > /tmp/wikimania_backend.pid
 
 echo "Starting Wikimania frontend..."
@@ -24,5 +24,5 @@ if [ ! -d node_modules ]; then npm install -q; fi
 npm run dev &
 echo $! > /tmp/wikimania_frontend.pid
 
-echo "Backend: http://localhost:8000"
+echo "Backend: http://localhost:8001"
 echo "Frontend: http://localhost:5173"

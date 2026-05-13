@@ -1,7 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
-
-const API = import.meta.env.VITE_API_URL ?? ''
+import { apiFetch } from '../api.js'
 
 const COMMUNITY_COLORS = [
   '#6c8cff', '#a78bfa', '#34d399', '#f59e0b',
@@ -32,7 +31,7 @@ export default function Graph({ wikiId, onNodeClick }) {
 
   async function fetchGraph() {
     try {
-      const r = await fetch(`${API}/api/wikis/${wikiId}/graph`)
+      const r = await apiFetch('GET', `/api/wikis/${wikiId}/graph`)
       const d = await r.json()
       if (!d.graph) { setMessage(d.message ?? 'No graph yet.'); return }
 

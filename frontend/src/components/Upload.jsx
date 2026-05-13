@@ -1,6 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-
-const API = import.meta.env.VITE_API_URL ?? ''
+import { apiFetch, streamUrl } from '../api.js'
 
 function formatTime(seconds) {
   const m = Math.floor(seconds / 60)
@@ -40,7 +39,7 @@ export default function Upload({ wikiId }) {
 
   async function fetchDocs() {
     try {
-      const r = await fetch(`${API}/api/wikis/${wikiId}/documents`)
+      const r = await apiFetch('GET', `/api/wikis/${wikiId}/documents`)
       const d = await r.json()
       setDocs(d.documents)
     } catch { /* ignore */ }
@@ -64,7 +63,7 @@ export default function Upload({ wikiId }) {
   }
 
   function attachStream(job_id) {
-    const es = new EventSource(`${API}/api/jobs/${job_id}/stream`)
+    const es = new EventSource(streamUrl(`/api/jobs/${job_id}/stream`))
 
     es.onmessage = e => {
       const ev = JSON.parse(e.data)
@@ -140,7 +139,7 @@ export default function Upload({ wikiId }) {
       const form = new FormData()
       form.append('file', file)
       form.append('parallel_writes', parallelWrites)
-      const r = await fetch(`${API}/api/wikis/${wikiId}/documents/upload`, { method: 'POST', body: form })
+      const r = await apiFetch('POST', `/api/wikis/${wikiId}/documents/upload`, form)
       if (!r.ok) { const e = await r.json(); throw new Error(e.detail ?? 'Upload failed') }
       const { job_id } = await r.json()
 
@@ -164,7 +163,7 @@ export default function Upload({ wikiId }) {
     startTimer()
 
     try {
-      const r = await fetch(`${API}/api/jobs/${pausedJobId}/resume`, { method: 'POST' })
+      const r = await apiFetch('POST', `/api/jobs/${pausedJobId}/resume`)
       if (!r.ok) { const e = await r.json(); throw new Error(e.detail ?? 'Resume failed') }
       attachStream(pausedJobId)
     } catch (err) {

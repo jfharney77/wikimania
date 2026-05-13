@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
-
-const API = import.meta.env.VITE_API_URL ?? ''
+import { apiFetch, streamUrl } from '../api.js'
 
 export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
   const [articles, setArticles] = useState([])
@@ -23,7 +22,7 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
 
   async function fetchList() {
     try {
-      const r = await fetch(`${API}/api/wikis/${wikiId}/articles`)
+      const r = await apiFetch('GET', `/api/wikis/${wikiId}/articles`)
       const d = await r.json()
       setArticles(d.articles)
     } catch { /* ignore */ }
@@ -32,7 +31,7 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
   async function loadArticle(id) {
     setLoading(true)
     try {
-      const r = await fetch(`${API}/api/wikis/${wikiId}/articles/${id}`)
+      const r = await apiFetch('GET', `/api/wikis/${wikiId}/articles/${id}`)
       const d = await r.json()
       setArticle(d)
       onSelect(id)
@@ -42,7 +41,7 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
   }
 
   async function handleExport() {
-    const r = await fetch(`${API}/api/wikis/${wikiId}/export`)
+    const r = await apiFetch('GET', `/api/wikis/${wikiId}/export`)
     if (!r.ok) return
     const blob = await r.blob()
     const url = URL.createObjectURL(blob)
@@ -55,7 +54,7 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
   }
 
   async function handleReset() {
-    const r = await fetch(`${API}/api/wikis/${wikiId}/content`, { method: 'DELETE' })
+    const r = await apiFetch('DELETE', `/api/wikis/${wikiId}/content`)
     if (!r.ok) return
     setArticles([])
     setArticle(null)
@@ -74,10 +73,10 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
     setCriticPhase('Starting critic...')
     setShowCritic(true)
     try {
-      const r = await fetch(`${API}/api/wikis/${wikiId}/critic`, { method: 'POST' })
+      const r = await apiFetch('POST', `/api/wikis/${wikiId}/critic`)
       if (!r.ok) { const e = await r.json(); throw new Error(e.detail ?? 'Failed') }
       const { job_id } = await r.json()
-      const es = new EventSource(`${API}/api/jobs/${job_id}/stream`)
+      const es = new EventSource(streamUrl(`/api/jobs/${job_id}/stream`))
       es.onmessage = e => {
         const ev = JSON.parse(e.data)
         if (ev.type === 'heartbeat') return

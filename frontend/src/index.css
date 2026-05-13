@@ -227,3 +227,63 @@ body { background: var(--bg); color: var(--text); min-height: 100vh; }
 
 .spinner { display: inline-block; width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 0.5rem; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Topbar user area */
+.topbar-user { display: flex; align-items: center; gap: 0.6rem; margin-left: auto; flex-shrink: 0; }
+.topbar-username { font-size: 0.85rem; color: var(--muted); }
+
+/* Login page */
+.login-page {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: var(--bg); padding: 1rem;
+}
+.login-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: calc(var(--radius) * 1.5);
+  padding: 2.5rem 2rem; width: 100%; max-width: 380px;
+}
+.login-title { font-size: 1.5rem; font-weight: 700; color: var(--accent); text-align: center; margin-bottom: 0.25rem; }
+.login-subtitle { font-size: 0.85rem; color: var(--muted); text-align: center; margin-bottom: 1.75rem; }
+.login-tabs { display: flex; gap: 0.25rem; margin-bottom: 1.5rem; background: var(--bg); border-radius: var(--radius); padding: 3px; }
+.login-tabs .tab { flex: 1; text-align: center; }
+.login-form { display: flex; flex-direction: column; gap: 1rem; }
+.login-field { display: flex; flex-direction: column; gap: 0.35rem; }
+.login-field label { font-size: 0.8rem; color: var(--muted); font-weight: 500; }
+.login-field input {
+  background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text); padding: 0.55rem 0.85rem; font-size: 0.9rem; outline: none; width: 100%;
+}
+.login-field input:focus { border-color: var(--accent); }
+.login-field select {
+  background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text); padding: 0.55rem 0.85rem; font-size: 0.9rem; outline: none; width: 100%;
+}
+.login-error { font-size: 0.82rem; color: var(--red); background: rgba(248,113,113,0.1); border-radius: var(--radius); padding: 0.5rem 0.75rem; }
+
+/* Role badges */
+.role-badge {
+  display: inline-block; font-size: 0.7rem; font-weight: 600; padding: 1px 7px;
+  border-radius: 99px; text-transform: uppercase; letter-spacing: 0.04em;
+}
+.role-admin { background: rgba(167,139,250,0.2); color: var(--accent2); border: 1px solid rgba(167,139,250,0.3); }
+.role-user  { background: rgba(148,163,184,0.15); color: var(--muted); border: 1px solid var(--border); }
+
+/* Admin panel */
+.admin-panel { padding: 2rem; max-width: 860px; margin: 0 auto; width: 100%; }
+.admin-panel h2 { font-size: 1.2rem; margin-bottom: 1.5rem; }
+.admin-section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1.5rem; }
+.admin-section h3 { font-size: 0.9rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1rem; }
+.admin-form-row { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-end; }
+.admin-form-row .login-field { min-width: 140px; flex: 1; }
+.admin-success { font-size: 0.82rem; color: var(--green); background: rgba(74,222,128,0.1); border-radius: var(--radius); padding: 0.5rem 0.75rem; margin-top: 0.5rem; }
+
+/* User table */
+.user-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+.user-table th { text-align: left; padding: 0.5rem 0.75rem; color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }
+.user-table td { padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.user-table tr:last-child td { border-bottom: none; }
+.user-table tr:hover td { background: var(--surface2); }
+.you-badge { font-size: 0.68rem; background: rgba(108,140,255,0.15); color: var(--accent); border: 1px solid rgba(108,140,255,0.3); border-radius: 99px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; }
+.user-count { font-size: 0.8rem; color: var(--muted); font-weight: 400; }
+.user-date { color: var(--muted); font-size: 0.8rem; }
+.role-select { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 0.25rem 0.5rem; font-size: 0.8rem; outline: none; cursor: pointer; }
+.role-select:focus { border-color: var(--accent); }

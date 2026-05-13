@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-
-const API = import.meta.env.VITE_API_URL ?? ''
+import { apiFetch } from '../api.js'
 
 export default function Query({ wikiId, onOpenArticle }) {
   const [question, setQuestion] = useState('')
@@ -17,11 +16,7 @@ export default function Query({ wikiId, onOpenArticle }) {
     setError('')
 
     try {
-      const r = await fetch(`${API}/api/wikis/${wikiId}/query`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question }),
-      })
+      const r = await apiFetch('POST', `/api/wikis/${wikiId}/query`, { question })
       if (!r.ok) { const d = await r.json(); throw new Error(d.detail ?? 'Query failed') }
       setResult(await r.json())
     } catch (err) {

@@ -6,3 +6,5 @@ httpx
 python-multipart
 graphifyy
 langgraph
+bcrypt
+python-jose[cryptography]

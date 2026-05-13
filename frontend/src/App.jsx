@@ -4,35 +4,58 @@ import WikiBrowser from './components/WikiBrowser.jsx'
 import Graph from './components/Graph.jsx'
 import Query from './components/Query.jsx'
 import WikiSelector from './components/WikiSelector.jsx'
+import LoginPage from './components/LoginPage.jsx'
+import AdminPanel from './components/AdminPanel.jsx'
+import { getToken, setToken, apiFetch } from './api.js'
 
-const API = import.meta.env.VITE_API_URL ?? ''
 const TABS = ['Upload', 'Wiki', 'Graph', 'Query']
 
 export default function App() {
+  const [user, setUser] = useState(null)
+  const [authChecked, setAuthChecked] = useState(false)
   const [tab, setTab] = useState('Upload')
   const [wikis, setWikis] = useState([])
   const [currentWiki, setCurrentWiki] = useState(null)
   const [selectedArticleId, setSelectedArticleId] = useState(null)
 
-  useEffect(() => { fetchWikis() }, [])
+  // Validate token on mount
+  useEffect(() => {
+    const token = getToken()
+    if (!token) { setAuthChecked(true); return }
+    apiFetch('GET', '/api/auth/me').then(async r => {
+      if (r.ok) {
+        const d = await r.json()
+        setUser({ username: d.username, role: d.role })
+      } else {
+        setToken(null)
+      }
+      setAuthChecked(true)
+    }).catch(() => setAuthChecked(true))
+  }, [])
+
+  // Listen for token expiry / 401 from any fetch
+  useEffect(() => {
+    const handler = () => { setUser(null); setWikis([]); setCurrentWiki(null) }
+    window.addEventListener('auth:logout', handler)
+    return () => window.removeEventListener('auth:logout', handler)
+  }, [])
+
+  useEffect(() => {
+    if (user) fetchWikis()
+  }, [user])
 
   async function fetchWikis() {
     try {
-      const r = await fetch(`${API}/api/wikis`)
+      const r = await apiFetch('GET', '/api/wikis')
+      if (!r.ok) return
       const d = await r.json()
       setWikis(d.wikis)
-      if (d.wikis.length > 0 && !currentWiki) {
-        setCurrentWiki(d.wikis[0])
-      }
+      if (d.wikis.length > 0 && !currentWiki) setCurrentWiki(d.wikis[0])
     } catch { /* ignore */ }
   }
 
   async function handleCreateWiki(name) {
-    const r = await fetch(`${API}/api/wikis`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    })
+    const r = await apiFetch('POST', '/api/wikis', { name })
     if (!r.ok) return
     const wiki = await r.json()
     setWikis(prev => [wiki, ...prev])
@@ -41,7 +64,7 @@ export default function App() {
   }
 
   async function handleDeleteWiki(wiki) {
-    const r = await fetch(`${API}/api/wikis/${wiki.id}`, { method: 'DELETE' })
+    const r = await apiFetch('DELETE', `/api/wikis/${wiki.id}`)
     if (!r.ok) return
     const remaining = wikis.filter(w => w.id !== wiki.id)
     setWikis(remaining)
@@ -49,10 +72,23 @@ export default function App() {
     setSelectedArticleId(null)
   }
 
+  function handleLogout() {
+    setToken(null)
+    setUser(null)
+    setWikis([])
+    setCurrentWiki(null)
+  }
+
   function openArticle(id) {
     setSelectedArticleId(id)
     setTab('Wiki')
   }
+
+  if (!authChecked) return null
+
+  if (!user) return <LoginPage onLogin={setUser} />
+
+  const tabs = user.role === 'admin' ? [...TABS, 'Admin'] : TABS
 
   return (
     <div className="app">
@@ -66,7 +102,7 @@ export default function App() {
           onDelete={handleDeleteWiki}
         />
         <nav className="tabs">
-          {TABS.map(t => (
+          {tabs.map(t => (
             <button
               key={t}
               className={`tab${tab === t ? ' active' : ''}`}
@@ -76,10 +112,17 @@ export default function App() {
             </button>
           ))}
         </nav>
+        <div className="topbar-user">
+          <span className="topbar-username">{user.username}</span>
+          {user.role === 'admin' && <span className="role-badge role-admin">admin</span>}
+          <button className="btn btn-outline btn-sm" onClick={handleLogout}>Sign out</button>
+        </div>
       </header>
 
       <main className="content">
-        {!currentWiki ? (
+        {tab === 'Admin' ? (
+          <AdminPanel currentUser={user} />
+        ) : !currentWiki ? (
           <div className="no-wiki">
             <p>Create or select a wiki to get started.</p>
           </div>

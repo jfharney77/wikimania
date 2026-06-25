@@ -193,6 +193,20 @@ body { background: var(--bg); color: var(--text); min-height: 100vh; }
 .critic-event-list li.ev-done { color: #4caf50; }
 .critic-event-list li.ev-error { color: #e57373; }
 
+/* Brainstorm panel — reuses .critic-panel layout, adds idea cards */
+.brainstorm-panel { border-top: 1px solid var(--border); padding: 0.6rem 0.75rem; background: var(--surface); max-height: 260px; overflow: hidden; display: flex; flex-direction: column; gap: 0.4rem; flex-shrink: 0; }
+.brainstorm-idea-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 0.4rem; }
+.brainstorm-idea { border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 0.5rem; display: flex; flex-direction: column; gap: 0.2rem; }
+.brainstorm-idea-head { display: flex; align-items: center; gap: 0.4rem; }
+.brainstorm-idea-title { font-size: 0.82rem; font-weight: 600; }
+.brainstorm-idea-rationale { font-size: 0.78rem; color: var(--muted); }
+.brainstorm-related { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.brainstorm-related .wikilink { font-size: 0.72rem; }
+.priority-chip { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.03em; padding: 1px 6px; border-radius: 999px; font-weight: 700; flex-shrink: 0; }
+.priority-chip.high { background: #5a1f1f; color: #ff9a9a; }
+.priority-chip.medium { background: #5a4a1f; color: #ffd479; }
+.priority-chip.low { background: #2a3a2a; color: #9fd49f; }
+
 /* Markdown rendering */
 .markdown { line-height: 1.7; font-size: 0.95rem; }
 .markdown h1, .markdown h2, .markdown h3 { margin: 1.5rem 0 0.5rem; line-height: 1.3; }

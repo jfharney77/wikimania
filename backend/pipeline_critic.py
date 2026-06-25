@@ -1,6 +1,5 @@
 import json
 import re
-from asyncio import Queue
 
 import db
 import llm
@@ -69,21 +68,21 @@ def _parse_json_list(raw: str) -> list:
         return []
 
 
-async def run_critic(wiki_id: int, job_id: int, queue: Queue):
+async def run_critic(wiki_id: int, job_id: int):
     try:
         await db.update_job_status(job_id, "running")
         articles = await db.get_all_articles(wiki_id)
 
         if not articles:
-            await queue.put({"type": "done", "duplicates_removed": 0, "contradictions_fixed": 0, "message": "No articles to review."})
+            await db.append_job_event(job_id, {"type": "done", "duplicates_removed": 0, "contradictions_fixed": 0, "message": "No articles to review."})
             await db.update_job_status(job_id, "done")
             return
 
         # ── Phase 1: Duplicates ──────────────────────────────────────────────
-        await queue.put({"type": "phase", "message": f"Scanning {len(articles)} articles for duplicates..."})
+        await db.append_job_event(job_id, {"type": "phase", "message": f"Scanning {len(articles)} articles for duplicates..."})
 
         titles_str = "\n".join(f"- {a['title']}" for a in articles)
-        await queue.put({"type": "progress", "message": "Analyzing titles with reasoning model..."})
+        await db.append_job_event(job_id, {"type": "progress", "message": "Analyzing titles with reasoning model..."})
         raw = await llm.call_reasoning(
             "You are a wiki editor identifying duplicate articles.",
             FIND_DUPLICATES_PROMPT.replace("{titles}", titles_str),
@@ -92,15 +91,15 @@ async def run_critic(wiki_id: int, job_id: int, queue: Queue):
 
         real_groups = [g for g in groups if isinstance(g, list) and len(g) >= 2 and len([a for a in articles if a["title"] in g]) >= 2]
         if real_groups:
-            await queue.put({"type": "progress", "message": f"Found {len(real_groups)} duplicate group(s) to merge..."})
+            await db.append_job_event(job_id, {"type": "progress", "message": f"Found {len(real_groups)} duplicate group(s) to merge..."})
         else:
-            await queue.put({"type": "progress", "message": "No duplicates found."})
+            await db.append_job_event(job_id, {"type": "progress", "message": "No duplicates found."})
 
         duplicates_removed = 0
         for group in real_groups:
             group_articles = [a for a in articles if a["title"] in group]
             primary = group_articles[0]
-            await queue.put({"type": "progress", "message": f'Merging "{primary["title"]}"...'})
+            await db.append_job_event(job_id, {"type": "progress", "message": f'Merging "{primary["title"]}"...'})
             articles_text = "\n\n---\n\n".join(
                 f"## {a['title']}\n{a['content']}" for a in group_articles
             )
@@ -113,14 +112,14 @@ async def run_critic(wiki_id: int, job_id: int, queue: Queue):
             await db.upsert_article(wiki_id, primary["title"], merged)
             for dup in group_articles[1:]:
                 await db.delete_article_by_title(wiki_id, dup["title"])
-                await queue.put({"type": "duplicate", "title": dup["title"], "merged_into": primary["title"]})
+                await db.append_job_event(job_id, {"type": "duplicate", "title": dup["title"], "merged_into": primary["title"]})
                 duplicates_removed += 1
 
         # Refresh after deduplication
         articles = await db.get_all_articles(wiki_id)
 
         # ── Phase 2: Contradictions ──────────────────────────────────────────
-        await queue.put({"type": "phase", "message": f"Scanning {len(articles)} articles for contradictions..."})
+        await db.append_job_event(job_id, {"type": "phase", "message": f"Scanning {len(articles)} articles for contradictions..."})
 
         contradictions_fixed = 0
         BATCH = 12
@@ -128,7 +127,7 @@ async def run_critic(wiki_id: int, job_id: int, queue: Queue):
         for i in range(0, len(articles), BATCH):
             batch = articles[i:i + BATCH]
             batch_num = i // BATCH + 1
-            await queue.put({"type": "progress", "message": f"Checking batch {batch_num}/{total_batches} ({len(batch)} articles)..."})
+            await db.append_job_event(job_id, {"type": "progress", "message": f"Checking batch {batch_num}/{total_batches} ({len(batch)} articles)..."})
             articles_text = "\n\n---\n\n".join(
                 f"## {a['title']}\n{a['content'][:800]}" for a in batch
             )
@@ -143,7 +142,7 @@ async def run_critic(wiki_id: int, job_id: int, queue: Queue):
                 article = next((a for a in batch if a["title"] == issue.get("article")), None)
                 if not article:
                     continue
-                await queue.put({"type": "progress", "message": f'Fixing "{article["title"]}"...'})
+                await db.append_job_event(job_id, {"type": "progress", "message": f'Fixing "{article["title"]}"...'})
                 fixed = await llm.call_reasoning(
                     "You are a wiki editor fixing a factual error.",
                     FIX_CONTRADICTION_PROMPT
@@ -153,13 +152,13 @@ async def run_critic(wiki_id: int, job_id: int, queue: Queue):
                         .replace("{fix}", issue.get("fix", "")),
                 )
                 await db.upsert_article(wiki_id, article["title"], fixed)
-                await queue.put({"type": "contradiction", "title": article["title"], "issue": issue.get("issue", "")})
+                await db.append_job_event(job_id, {"type": "contradiction", "title": article["title"], "issue": issue.get("issue", "")})
                 contradictions_fixed += 1
 
         msg = f"Done. {duplicates_removed} duplicate(s) removed, {contradictions_fixed} contradiction(s) fixed."
-        await queue.put({"type": "done", "duplicates_removed": duplicates_removed, "contradictions_fixed": contradictions_fixed, "message": msg})
+        await db.append_job_event(job_id, {"type": "done", "duplicates_removed": duplicates_removed, "contradictions_fixed": contradictions_fixed, "message": msg})
         await db.update_job_status(job_id, "done")
 
     except Exception as e:
-        await queue.put({"type": "error", "message": str(e)})
+        await db.append_job_event(job_id, {"type": "error", "message": str(e)})
         await db.update_job_status(job_id, "error", str(e))

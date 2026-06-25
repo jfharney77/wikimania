@@ -24,8 +24,7 @@ else:
     import pipeline as wiki_pipeline
 
 import pipeline_critic as _critic_pipeline
-
-_job_queues: dict[int, asyncio.Queue] = {}
+import pipeline_brainstorm as _brainstorm_pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +67,11 @@ async def lifespan(app: FastAPI):
     if database_url.startswith("postgres://"):
         database_url = "postgresql://" + database_url[len("postgres://"):]
     await asyncio.wait_for(db.init_pool(database_url), timeout=30)
+
+    # Fail any jobs left 'running' by a prior crash/restart so the UI doesn't spin forever.
+    orphaned = await db.mark_orphaned_jobs()
+    if orphaned:
+        print(f"[wikimania] Marked {orphaned} orphaned job(s) as errored on startup.")
 
     # Bootstrap first admin if no users exist
     first_admin = os.getenv("FIRST_ADMIN_USERNAME", "").strip()
@@ -265,11 +269,8 @@ async def upload_document(
     doc_id = await db.save_document(wiki_id=wiki_id, filename=file.filename, content=content)
     job_id = await db.create_job(wiki_id=wiki_id, doc_id=doc_id)
 
-    queue: asyncio.Queue = asyncio.Queue()
-    _job_queues[job_id] = queue
-
     asyncio.create_task(
-        wiki_pipeline.generate_wiki(wiki_id, job_id, doc_id, content, queue, parallel_writes=parallel_writes)
+        wiki_pipeline.generate_wiki(wiki_id, job_id, doc_id, content, parallel_writes=parallel_writes)
     )
 
     return {"job_id": job_id, "doc_id": doc_id, "filename": file.filename}
@@ -289,25 +290,30 @@ async def stream_job(job_id: int, _user: dict = Depends(get_current_user)):
     async def event_generator():
         yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
 
-        queue = _job_queues.get(job_id)
-        if not queue:
-            job = await db.get_job(job_id)
-            status = job["status"] if job else "unknown"
-            yield f"data: {json.dumps({'type': status, 'message': f'Job {status}'})}\n\n"
+        if not await db.get_job(job_id):
+            yield f"data: {json.dumps({'type': 'unknown', 'message': 'Job unknown'})}\n\n"
             return
 
+        # Poll the durable event log. Safe across restarts and worker processes
+        # because every worker reads the same Postgres rows. Events replay from
+        # seq 0, so a late or reconnecting client still sees the full history.
+        seq = 0
         while True:
-            try:
-                event = await asyncio.wait_for(queue.get(), timeout=15.0)
-            except asyncio.TimeoutError:
+            events = await db.get_job_events_after(job_id, seq)
+            if events:
+                for ev in events:
+                    yield f"data: {ev['event_json']}\n\n"
+                    seq = ev["seq"]
+                    if json.loads(ev["event_json"]).get("type") in ("done", "error"):
+                        return
+            else:
+                job = await db.get_job(job_id)
+                if job and job["status"] in ("done", "error"):
+                    # Terminal status with no further events to drain — stop streaming.
+                    return
                 yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
-                continue
 
-            yield f"data: {json.dumps(event, default=str)}\n\n"
-
-            if event.get("type") in ("done", "error"):
-                _job_queues.pop(job_id, None)
-                break
+            await asyncio.sleep(1.0)
 
     return StreamingResponse(
         event_generator(),
@@ -339,9 +345,6 @@ async def resume_job(job_id: int, _user: dict = Depends(get_current_user)):
     if not doc:
         raise HTTPException(status_code=404, detail="Source document not found.")
 
-    queue: asyncio.Queue = asyncio.Queue()
-    _job_queues[job_id] = queue
-
     asyncio.create_task(
         wiki_pipeline.resume_wiki(
             wiki_id=job["wiki_id"],
@@ -349,7 +352,6 @@ async def resume_job(job_id: int, _user: dict = Depends(get_current_user)):
             doc_id=state["doc_id"],
             concepts=state["remaining_concepts"],
             content=doc["content"],
-            queue=queue,
             created_so_far=state["created"],
             updated_so_far=state["updated"],
             parallel_writes=state.get("parallel_writes", 1),
@@ -439,21 +441,44 @@ async def start_critic(wiki_id: int, _user: dict = Depends(get_current_user)):
     if not wiki:
         raise HTTPException(status_code=404, detail="Wiki not found.")
     job_id = await db.create_job(wiki_id)
-    queue: asyncio.Queue = asyncio.Queue()
-    _job_queues[job_id] = queue
-    asyncio.create_task(_run_critic_task(wiki_id, job_id, queue))
+    asyncio.create_task(_run_critic_task(wiki_id, job_id))
     return {"job_id": job_id}
 
 
-async def _run_critic_task(wiki_id: int, job_id: int, queue: asyncio.Queue):
+async def _run_critic_task(wiki_id: int, job_id: int):
     try:
-        await _critic_pipeline.run_critic(wiki_id, job_id, queue)
+        await _critic_pipeline.run_critic(wiki_id, job_id)
     except Exception as e:
-        await queue.put({"type": "error", "message": str(e)})
+        await db.append_job_event(job_id, {"type": "error", "message": str(e)})
         await db.update_job_status(job_id, "error", str(e))
-    finally:
-        await asyncio.sleep(300)
-        _job_queues.pop(job_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Brainstorm agent (read-only; open-source model via Ollama)
+# ---------------------------------------------------------------------------
+
+class BrainstormRequest(BaseModel):
+    mode: str  # "stability" | "conflicts" | "ideas"
+
+
+@app.post("/api/wikis/{wiki_id}/brainstorm")
+async def start_brainstorm(wiki_id: int, req: BrainstormRequest, _user: dict = Depends(get_current_user)):
+    if req.mode not in _brainstorm_pipeline.MODES:
+        raise HTTPException(status_code=400, detail="Invalid mode.")
+    wiki = await db.get_wiki(wiki_id)
+    if not wiki:
+        raise HTTPException(status_code=404, detail="Wiki not found.")
+    job_id = await db.create_job(wiki_id)
+    asyncio.create_task(_run_brainstorm_task(wiki_id, job_id, req.mode))
+    return {"job_id": job_id}
+
+
+async def _run_brainstorm_task(wiki_id: int, job_id: int, mode: str):
+    try:
+        await _brainstorm_pipeline.run_brainstorm(wiki_id, job_id, mode)
+    except Exception as e:
+        await db.append_job_event(job_id, {"type": "error", "message": str(e)})
+        await db.update_job_status(job_id, "error", str(e))
 
 
 # ---------------------------------------------------------------------------

@@ -81,4 +81,5 @@ OLLAMA_BASE_URL=http://172.30.48.1:11434
 - `wiki_articles` — generated articles (markdown with [[wikilinks]])
 - `article_links` — parsed wikilink edges (from_id → to_title)
 - `generation_jobs` — job status + error log
+- `job_events` — durable SSE event log (one row per event, ordered by per-job `seq`); the `/api/jobs/{id}/stream` endpoint polls this table instead of an in-process queue, so progress survives restarts and works across worker processes
 - `graph_snapshots` — graphify JSON output (latest is served to frontend)

@@ -3,7 +3,6 @@ import json
 import os
 import re
 import tempfile
-from asyncio import Queue
 
 from fastapi import HTTPException
 
@@ -121,7 +120,6 @@ async def _write_articles(
     doc_id: int,
     concepts: list[str],
     content: str,
-    queue: Queue,
     created: int = 0,
     updated: int = 0,
     parallel_writes: int = 1,
@@ -157,7 +155,7 @@ async def _write_articles(
                     "parallel_writes": parallel_writes,
                 }))
                 await db.set_document_status(doc_id, "paused")
-                await queue.put({
+                await db.append_job_event(job_id, {
                     "type": "paused",
                     "remaining": len(remaining),
                     "created": created,
@@ -178,7 +176,7 @@ async def _write_articles(
                 updated += 1
             n_done += 1
 
-            await queue.put({
+            await db.append_job_event(job_id, {
                 "type": "article",
                 "title": title,
                 "status": "created" if was_created else "updated",
@@ -189,12 +187,12 @@ async def _write_articles(
     return created, updated
 
 
-async def generate_wiki(wiki_id: int, job_id: int, doc_id: int, content: str, queue: Queue, parallel_writes: int = 1):
+async def generate_wiki(wiki_id: int, job_id: int, doc_id: int, content: str, parallel_writes: int = 1):
     try:
         await db.update_job_status(job_id, "running")
 
         # Phase 1 — concept extraction
-        await queue.put({"type": "phase", "phase": 1, "message": "Extracting concepts from document..."})
+        await db.append_job_event(job_id, {"type": "phase", "phase": 1, "message": "Extracting concepts from document..."})
         existing_titles = await db.list_article_titles(wiki_id)
         titles_preview = ", ".join(existing_titles[:50]) or "none yet"
         prompt = _fill(
@@ -206,33 +204,33 @@ async def generate_wiki(wiki_id: int, job_id: int, doc_id: int, content: str, qu
         concepts = llm.parse_json_array(raw)
 
         if not concepts:
-            await queue.put({"type": "warning", "message": "No new concepts found in this document."})
-            await queue.put({"type": "done", "articles_created": 0, "articles_updated": 0, "stubs_created": 0, "message": "No new concepts found."})
+            await db.append_job_event(job_id, {"type": "warning", "message": "No new concepts found in this document."})
+            await db.append_job_event(job_id, {"type": "done", "articles_created": 0, "articles_updated": 0, "stubs_created": 0, "message": "No new concepts found."})
             await db.update_job_status(job_id, "done")
             await db.set_document_status(doc_id, "done")
             return
 
-        await queue.put({"type": "concepts", "titles": concepts, "count": len(concepts)})
+        await db.append_job_event(job_id, {"type": "concepts", "titles": concepts, "count": len(concepts)})
 
         # Phase 2 — write / expand articles
-        await queue.put({"type": "phase", "phase": 2, "message": f"Writing {len(concepts)} wiki articles..."})
-        result = await _write_articles(wiki_id, job_id, doc_id, concepts, content, queue, parallel_writes=parallel_writes)
+        await db.append_job_event(job_id, {"type": "phase", "phase": 2, "message": f"Writing {len(concepts)} wiki articles..."})
+        result = await _write_articles(wiki_id, job_id, doc_id, concepts, content, parallel_writes=parallel_writes)
         if result is None:
             return  # Rate limit hit — job paused, state saved
 
         created, updated = result
 
         # Phase 2b — stubs for dangling wikilinks
-        stubs = await _create_stubs(wiki_id, queue)
+        stubs = await _create_stubs(wiki_id, job_id)
 
         # Phase 3 — rebuild knowledge graph
-        await queue.put({"type": "phase", "phase": 3, "message": "Rebuilding knowledge graph..."})
+        await db.append_job_event(job_id, {"type": "phase", "phase": 3, "message": "Rebuilding knowledge graph..."})
         await _rebuild_graph(wiki_id)
-        await queue.put({"type": "graph_done", "message": "Knowledge graph updated."})
+        await db.append_job_event(job_id, {"type": "graph_done", "message": "Knowledge graph updated."})
 
         await db.update_job_status(job_id, "done")
         await db.set_document_status(doc_id, "done")
-        await queue.put({
+        await db.append_job_event(job_id, {
             "type": "done",
             "articles_created": created,
             "articles_updated": updated,
@@ -244,7 +242,7 @@ async def generate_wiki(wiki_id: int, job_id: int, doc_id: int, content: str, qu
         err = str(exc)
         await db.update_job_status(job_id, "error", error=err)
         await db.set_document_status(doc_id, "error")
-        await queue.put({"type": "error", "message": err})
+        await db.append_job_event(job_id, {"type": "error", "message": err})
 
 
 async def resume_wiki(
@@ -253,30 +251,29 @@ async def resume_wiki(
     doc_id: int,
     concepts: list[str],
     content: str,
-    queue: Queue,
     created_so_far: int,
     updated_so_far: int,
     parallel_writes: int = 1,
 ):
     try:
         await db.update_job_status(job_id, "running")
-        await queue.put({"type": "phase", "phase": 2, "message": f"Resuming — {len(concepts)} article(s) remaining..."})
+        await db.append_job_event(job_id, {"type": "phase", "phase": 2, "message": f"Resuming — {len(concepts)} article(s) remaining..."})
 
-        result = await _write_articles(wiki_id, job_id, doc_id, concepts, content, queue, created_so_far, updated_so_far, parallel_writes=parallel_writes)
+        result = await _write_articles(wiki_id, job_id, doc_id, concepts, content, created_so_far, updated_so_far, parallel_writes=parallel_writes)
         if result is None:
             return  # Rate limited again — paused state saved
 
         created, updated = result
 
-        stubs = await _create_stubs(wiki_id, queue)
+        stubs = await _create_stubs(wiki_id, job_id)
 
-        await queue.put({"type": "phase", "phase": 3, "message": "Rebuilding knowledge graph..."})
+        await db.append_job_event(job_id, {"type": "phase", "phase": 3, "message": "Rebuilding knowledge graph..."})
         await _rebuild_graph(wiki_id)
-        await queue.put({"type": "graph_done", "message": "Knowledge graph updated."})
+        await db.append_job_event(job_id, {"type": "graph_done", "message": "Knowledge graph updated."})
 
         await db.update_job_status(job_id, "done")
         await db.set_document_status(doc_id, "done")
-        await queue.put({
+        await db.append_job_event(job_id, {
             "type": "done",
             "articles_created": created,
             "articles_updated": updated,
@@ -288,10 +285,10 @@ async def resume_wiki(
         err = str(exc)
         await db.update_job_status(job_id, "error", error=err)
         await db.set_document_status(doc_id, "error")
-        await queue.put({"type": "error", "message": err})
+        await db.append_job_event(job_id, {"type": "error", "message": err})
 
 
-async def _create_stubs(wiki_id: int, queue: Queue) -> int:
+async def _create_stubs(wiki_id: int, job_id: int) -> int:
     all_links = await db.get_all_article_links(wiki_id)
     existing_titles = set(await db.list_article_titles(wiki_id))
 
@@ -303,7 +300,7 @@ async def _create_stubs(wiki_id: int, queue: Queue) -> int:
     for title in sorted(dangling):
         await db.upsert_article(wiki_id, title, STUB_CONTENT)
         count += 1
-        await queue.put({"type": "stub", "title": title})
+        await db.append_job_event(job_id, {"type": "stub", "title": title})
 
     return count
 

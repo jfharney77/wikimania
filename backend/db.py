@@ -1,4 +1,5 @@
 import asyncpg
+import json
 import os
 import re
 
@@ -66,6 +67,18 @@ async def init_pool(database_url: str):
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS job_events (
+                id         BIGSERIAL PRIMARY KEY,
+                job_id     INT NOT NULL REFERENCES generation_jobs(id) ON DELETE CASCADE,
+                seq        INT NOT NULL,
+                event_json TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS job_events_job_id_seq_idx ON job_events (job_id, seq)"
+        )
 
         # Migration: add paused_state to generation_jobs
         await conn.execute("""
@@ -289,6 +302,60 @@ async def get_job(job_id: int) -> dict | None:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM generation_jobs WHERE id=$1", job_id)
         return dict(row) if row else None
+
+
+async def mark_orphaned_jobs() -> int:
+    """Fail jobs left 'running'/'pending' by a prior server crash or restart.
+
+    Paused jobs are intentionally left alone — they are resumable by the user.
+    The 1-hour threshold avoids racing jobs that are legitimately still starting.
+    Returns the number of jobs marked as errored.
+    """
+    async with get_pool().acquire() as conn:
+        result = await conn.execute(
+            """UPDATE generation_jobs
+               SET status='error',
+                   error='Server restarted while job was running',
+                   completed_at=now()
+               WHERE status IN ('running', 'pending')
+                 AND created_at < now() - interval '1 hour'"""
+        )
+        # result looks like "UPDATE <n>"
+        try:
+            return int(result.split()[-1])
+        except (ValueError, IndexError):
+            return 0
+
+
+# ---------------------------------------------------------------------------
+# Job events (durable SSE backing store — survives restarts, multi-worker safe)
+# ---------------------------------------------------------------------------
+
+async def append_job_event(job_id: int, event: dict) -> int:
+    """Append an event to a job's durable event log. Returns the assigned seq.
+
+    The seq is computed atomically per job inside the INSERT so concurrent
+    producers (or workers) never collide.
+    """
+    event_json = json.dumps(event, default=str)
+    async with get_pool().acquire() as conn:
+        return await conn.fetchval(
+            """INSERT INTO job_events (job_id, seq, event_json)
+               SELECT $1, COALESCE(MAX(seq), 0) + 1, $2
+               FROM job_events WHERE job_id=$1
+               RETURNING seq""",
+            job_id, event_json,
+        )
+
+
+async def get_job_events_after(job_id: int, after_seq: int) -> list[dict]:
+    """Return events for a job with seq > after_seq, in order."""
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT seq, event_json FROM job_events WHERE job_id=$1 AND seq>$2 ORDER BY seq",
+            job_id, after_seq,
+        )
+        return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------

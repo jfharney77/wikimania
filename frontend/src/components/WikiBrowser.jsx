@@ -13,6 +13,12 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
   const [criticPhase, setCriticPhase] = useState('')
   const [showCritic, setShowCritic] = useState(false)
   const criticListRef = useRef()
+  const [brainstormRunning, setBrainstormRunning] = useState(false)
+  const [brainstormMode, setBrainstormMode] = useState('stability')
+  const [brainstormIdeas, setBrainstormIdeas] = useState([])
+  const [brainstormPhase, setBrainstormPhase] = useState('')
+  const [showBrainstorm, setShowBrainstorm] = useState(false)
+  const brainstormListRef = useRef()
 
   useEffect(() => { setArticle(null); setQuery(''); fetchList() }, [wikiId])
 
@@ -107,6 +113,48 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
     } catch (err) {
       addCriticEvent({ cls: 'ev-error', text: `✗ ${err.message}` })
       setCriticRunning(false)
+    }
+  }
+
+  const BRAINSTORM_LABELS = {
+    stability: 'Stability',
+    conflicts: 'Resolve Conflicts',
+    ideas: 'New Ideas',
+  }
+
+  async function handleRunBrainstorm() {
+    const mode = brainstormMode
+    setBrainstormRunning(true)
+    setBrainstormIdeas([])
+    setBrainstormPhase(`Brainstorming: ${BRAINSTORM_LABELS[mode]}...`)
+    setShowBrainstorm(true)
+    try {
+      const r = await apiFetch('POST', `/api/wikis/${wikiId}/brainstorm`, { mode })
+      if (!r.ok) { const e = await r.json(); throw new Error(e.detail ?? 'Failed') }
+      const { job_id } = await r.json()
+      const es = new EventSource(streamUrl(`/api/jobs/${job_id}/stream`))
+      es.onmessage = e => {
+        const ev = JSON.parse(e.data)
+        if (ev.type === 'heartbeat') return
+        if (ev.type === 'phase') {
+          setBrainstormPhase(ev.message)
+        } else if (ev.type === 'idea') {
+          setBrainstormIdeas(prev => [...prev, ev])
+          setTimeout(() => brainstormListRef.current?.scrollTo(0, brainstormListRef.current.scrollHeight), 50)
+        } else if (ev.type === 'done') {
+          setBrainstormPhase(ev.message)
+          setBrainstormRunning(false)
+          es.close()
+        } else if (ev.type === 'error') {
+          setBrainstormPhase(`Error: ${ev.message}`)
+          setBrainstormRunning(false)
+          es.close()
+        }
+      }
+      es.onerror = () => { setBrainstormRunning(false); es.close() }
+    } catch (err) {
+      setBrainstormPhase(`Error: ${err.message}`)
+      setBrainstormRunning(false)
     }
   }
 

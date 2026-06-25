@@ -10,6 +10,12 @@ MODEL_FAST = os.getenv("MODEL_FAST", "llama3.1-8b")
 MODEL_REASONING = os.getenv("MODEL_REASONING", "gpt-oss-120b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
+# Brainstorm agent runs on an open-source model. By default it targets Ollama
+# directly, independent of PROVIDER, so it works even when the rest of the app
+# uses a cloud provider. Set BRAINSTORM_PROVIDER=inherit to reuse call_reasoning.
+MODEL_BRAINSTORM = os.getenv("MODEL_BRAINSTORM", "qwen2.5")
+BRAINSTORM_PROVIDER = os.getenv("BRAINSTORM_PROVIDER", "ollama")
+
 # Unified API key — falls back to GROQ_API_KEY for backward compatibility.
 API_KEY = os.getenv("API_KEY") or os.getenv("GROQ_API_KEY", "")
 
@@ -83,6 +89,13 @@ async def call_reasoning(system: str, user: str) -> str:
         return await _call_ollama(MODEL_REASONING, f"{system}\n\n{user}", timeout=240.0)
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     return await _call_openai_compat(MODEL_REASONING, messages, timeout=240.0)
+
+
+async def call_brainstorm(system: str, user: str) -> str:
+    """Run the brainstorm model. Defaults to Ollama (open-source) regardless of PROVIDER."""
+    if BRAINSTORM_PROVIDER == "ollama":
+        return await _call_ollama(MODEL_BRAINSTORM, f"{system}\n\n{user}", timeout=240.0)
+    return await call_reasoning(system, user)
 
 
 def parse_json_array(text: str) -> list[str]:

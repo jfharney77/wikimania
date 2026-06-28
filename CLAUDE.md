@@ -11,6 +11,7 @@ React (Vite) frontend + FastAPI backend. The Vite dev server proxies `/api/*` to
 
 - **Wiki generation is async** — upload returns a `job_id` immediately; the frontend streams progress via SSE from `/api/jobs/{id}/stream`.
 - **Two LLM tiers** — `MODEL_FAST` (llama-3.1-8b-instant) for concept extraction; `MODEL_REASONING` (qwen/qwen3-32b) for article writing and query answering.
+- **Brainstorm runs on an open-source model** — `pipeline_brainstorm.py` is a read-only LangGraph agent that calls `llm.call_brainstorm` (`MODEL_BRAINSTORM`, default `qwen2.5` via Ollama). It uses `BRAINSTORM_PROVIDER=ollama` independently of `PROVIDER`, so it works on a local model even when generation runs on a cloud provider. It only emits `idea` events — it never mutates `wiki_articles`.
 - **graphify used as a Python library** — after every upload, `pipeline.py` imports `graphify.build`, `graphify.cluster`, `graphify.export` directly (no subprocess). The resulting graph JSON is stored in the `graph_snapshots` table.
 - **Obsidian-compatible wikilinks** — articles are stored as markdown with `[[Article Title]]` syntax. `GET /api/wiki/export` zips all articles for download as an Obsidian vault.
 - **No embeddings / vector search** — queries use PostgreSQL `ILIKE` to find relevant articles, then pass them to the reasoning LLM.
@@ -62,6 +63,8 @@ OLLAMA_BASE_URL=http://172.30.48.1:11434
 | POST | `/api/wiki/query` | Ask a question → LLM-synthesized answer |
 | GET | `/api/wiki/graph` | Latest graphify graph JSON |
 | GET | `/api/wiki/export` | Download Obsidian vault zip |
+| POST | `/api/wikis/{id}/critic` | Run critic agent (merges duplicates, fixes contradictions) → job_id |
+| POST | `/api/wikis/{id}/brainstorm` | Run read-only brainstorm agent in a `mode` (`stability`/`conflicts`/`ideas`) → job_id |
 
 ## SSE event types
 
@@ -74,6 +77,7 @@ OLLAMA_BASE_URL=http://172.30.48.1:11434
 | `done` | `{articles_created, articles_updated}` | job finished |
 | `error` | `{message}` | job failed |
 | `heartbeat` | — | keep-alive (every 25 s) |
+| `idea` | `{title, rationale, related_articles, priority}` | one brainstorm suggestion (read-only; never writes articles) |
 
 ## Database tables
 

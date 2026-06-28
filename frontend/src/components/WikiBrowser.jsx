@@ -223,6 +223,30 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
             </button>
           )}
           {articles.length > 0 && (
+            <>
+              <select
+                value={brainstormMode}
+                onChange={e => setBrainstormMode(e.target.value)}
+                disabled={brainstormRunning}
+                title="Choose what to brainstorm"
+                style={{ fontSize: '0.8rem', padding: '0.25rem 0.4rem' }}
+              >
+                <option value="stability">Stability</option>
+                <option value="conflicts">Resolve Conflicts</option>
+                <option value="ideas">New Ideas</option>
+              </select>
+              <button
+                className="btn btn-outline"
+                style={{ fontSize: '0.8rem', padding: '0.25rem 0.6rem' }}
+                onClick={handleRunBrainstorm}
+                disabled={brainstormRunning}
+                title="Brainstorm ideas from the wiki (open-source model)"
+              >
+                {brainstormRunning ? <><span className="spinner" /> Brainstorm...</> : '💡 Brainstorm'}
+              </button>
+            </>
+          )}
+          {articles.length > 0 && (
             <button
               className="btn-danger-outline"
               title="Reset wiki content"
@@ -262,6 +286,50 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
             <ul className="critic-event-list" ref={criticListRef}>
               {criticEvents.map((ev, i) => (
                 <li key={i} className={ev.cls}>{ev.text}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {showBrainstorm && (
+          <div className="brainstorm-panel">
+            <div className="critic-panel-header">
+              <span className="phase-label">{brainstormPhase}</span>
+              <button
+                className="btn-danger-outline"
+                onClick={() => { if (!brainstormRunning) setShowBrainstorm(false) }}
+                title="Close"
+                disabled={brainstormRunning}
+              >✕</button>
+            </div>
+            <ul className="brainstorm-idea-list" ref={brainstormListRef}>
+              {brainstormIdeas.length === 0 && !brainstormRunning && (
+                <li style={{ fontSize: '0.78rem', color: 'var(--muted)' }}>No suggestions.</li>
+              )}
+              {brainstormIdeas.map((idea, i) => (
+                <li key={i} className="brainstorm-idea">
+                  <div className="brainstorm-idea-head">
+                    <span className={`priority-chip ${idea.priority}`}>{idea.priority}</span>
+                    <span className="brainstorm-idea-title">{idea.title}</span>
+                  </div>
+                  {idea.rationale && <div className="brainstorm-idea-rationale">{idea.rationale}</div>}
+                  {idea.related_articles?.length > 0 && (
+                    <div className="brainstorm-related">
+                      {idea.related_articles.map((title, j) => {
+                        const target = articles.find(a => a.title === title)
+                        return (
+                          <span
+                            key={j}
+                            className="wikilink"
+                            onClick={() => target && loadArticle(target.id)}
+                            title={target ? `Open: ${title}` : `${title} (not in wiki)`}
+                          >
+                            {title}
+                          </span>
+                        )
+                      })}
+                    </div>
+                  )}
+                </li>
               ))}
             </ul>
           </div>

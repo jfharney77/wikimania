@@ -11,13 +11,16 @@ function communityColor(communityId) {
   return COMMUNITY_COLORS[(communityId ?? 0) % COMMUNITY_COLORS.length]
 }
 
+const GRADE_COLOR = { A: '#34d399', B: '#a3e635', C: '#f59e0b', D: '#fb7185', F: '#f87171' }
+
 export default function Graph({ wikiId, onNodeClick }) {
   const [graphData, setGraphData] = useState(null)
+  const [evalData, setEvalData] = useState(null)
   const [message, setMessage] = useState('')
   const containerRef = useRef()
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 })
 
-  useEffect(() => { setGraphData(null); fetchGraph() }, [wikiId])
+  useEffect(() => { setGraphData(null); setEvalData(null); fetchGraph(); fetchEval() }, [wikiId])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -50,6 +53,14 @@ export default function Graph({ wikiId, onNodeClick }) {
     } catch {
       setMessage('Failed to load graph.')
     }
+  }
+
+  async function fetchEval() {
+    try {
+      const r = await apiFetch('GET', `/api/wikis/${wikiId}/graph/eval`)
+      const d = await r.json()
+      if (d.eval) setEvalData(d.eval)
+    } catch { /* eval is best-effort; ignore failures */ }
   }
 
   const nodeCanvasObject = useCallback((node, ctx, globalScale) => {
@@ -99,6 +110,28 @@ export default function Graph({ wikiId, onNodeClick }) {
             onNodeClick={handleNodeClick}
             nodeLabel={node => node.label}
           />
+          {evalData && (
+            <div className="graph-eval">
+              <div className="graph-eval-score">
+                <span
+                  className="graph-eval-grade"
+                  style={{ background: GRADE_COLOR[evalData.grade] ?? '#6c8cff' }}
+                >
+                  {evalData.grade}
+                </span>
+                <div>
+                  <strong>{evalData.connectivity_score}</strong>/100
+                  <div className="graph-eval-sub">connectivity</div>
+                </div>
+              </div>
+              <div className="graph-eval-rows">
+                <div><span>Orphans</span><span>{evalData.orphans} ({Math.round(evalData.orphan_rate * 100)}%)</span></div>
+                <div><span>Components</span><span>{evalData.components}</span></div>
+                <div><span>Largest cluster</span><span>{Math.round(evalData.largest_component_fraction * 100)}%</span></div>
+                <div><span>Avg degree</span><span>{evalData.avg_degree}</span></div>
+              </div>
+            </div>
+          )}
           {communities.length > 0 && (
             <div className="graph-legend">
               <h4>Communities</h4>

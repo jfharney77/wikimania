@@ -25,6 +25,7 @@ else:
 
 import pipeline_critic as _critic_pipeline
 import pipeline_brainstorm as _brainstorm_pipeline
+import graph_eval
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +404,14 @@ async def get_graph(wiki_id: int, _user: dict = Depends(get_current_user)):
     if not graph_json:
         return {"graph": None, "message": "No graph yet — upload a document first."}
     return {"graph": json.loads(graph_json)}
+
+
+@app.get("/api/wikis/{wiki_id}/graph/eval")
+async def eval_graph(wiki_id: int, _user: dict = Depends(get_current_user)):
+    graph_json = await db.get_latest_graph(wiki_id)
+    if not graph_json:
+        return {"eval": None, "message": "No graph yet — upload a document first."}
+    return {"eval": graph_eval.evaluate_graph(json.loads(graph_json))}
 
 
 # ---------------------------------------------------------------------------

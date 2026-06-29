@@ -62,6 +62,7 @@ OLLAMA_BASE_URL=http://172.30.48.1:11434
 | GET | `/api/wiki/articles/{id}` | Full article content |
 | POST | `/api/wiki/query` | Ask a question → LLM-synthesized answer |
 | GET | `/api/wiki/graph` | Latest graphify graph JSON |
+| GET | `/api/wikis/{id}/graph/eval` | Graph health metrics (connectivity score, orphan rate, components) |
 | GET | `/api/wiki/export` | Download Obsidian vault zip |
 | POST | `/api/wikis/{id}/critic` | Run critic agent (merges duplicates, fixes contradictions) → job_id |
 | POST | `/api/wikis/{id}/brainstorm` | Run read-only brainstorm agent in a `mode` (`stability`/`conflicts`/`ideas`) → job_id |

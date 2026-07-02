@@ -18,13 +18,13 @@ React (Vite) frontend + FastAPI backend. The Vite dev server proxies `/api/*` to
 
 ## Running locally
 
-**Backend** (port 8000):
+**Backend** (port 8001 — the Vite dev proxy in `frontend/vite.config.js` forwards `/api` here):
 ```bash
 cd backend
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 cp .env.example .env   # fill in GROQ_API_KEY and DATABASE_URL
-.venv/bin/uvicorn main:app --reload --port 8000
+.venv/bin/uvicorn main:app --reload --port 8001
 ```
 
 **Frontend** (port 5173):

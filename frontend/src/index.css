@@ -232,6 +232,16 @@ body { background: var(--bg); color: var(--text); min-height: 100vh; }
 .graph-eval-sub { color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; }
 .graph-eval-rows > div { display: flex; justify-content: space-between; gap: 1rem; padding: 0.15rem 0; color: var(--muted); }
 .graph-eval-rows > div > span:last-child { color: var(--text, #e2e8f0); }
+.graph-path { position: absolute; bottom: 1rem; left: 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.75rem 1rem; font-size: 0.8rem; width: 230px; display: flex; flex-direction: column; gap: 0.4rem; }
+.graph-path h4 { color: var(--muted); margin-bottom: 0.1rem; }
+.graph-path select { width: 100%; background: #0f1117; color: #e2e8f0; border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.4rem; font-size: 0.8rem; }
+.graph-path-btns { display: flex; gap: 0.4rem; }
+.graph-path-btns button { flex: 1; padding: 0.35rem; border-radius: 6px; border: none; background: #6c8cff; color: #0f1117; font-weight: 600; cursor: pointer; }
+.graph-path-btns button.secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+.graph-path-msg { color: var(--muted); font-size: 0.75rem; }
+.graph-path-hops { color: #f59e0b; font-weight: 700; margin-bottom: 0.2rem; }
+.graph-path-chain { line-height: 1.5; color: #e2e8f0; }
+.graph-path-arrow { color: #f59e0b; }
 
 /* Query tab */
 .query-tab { padding: 2rem; max-width: 780px; margin: 0 auto; width: 100%; }

@@ -1,8 +1,12 @@
 # SPEC: Graph Shortest Path Between Two Nodes
 
-**Branch:** TBD (suggested `feature/graph-shortest-path`)
-**Status:** Proposed (not yet implemented)
-**Date:** 2026-06-28
+**Branch:** `feature/graph-eval`
+**Status:** Implemented
+**Date:** 2026-06-28 (implemented 2026-07-01)
+
+> Implementation note: `graph_path.py` inlines its own `canonical_key` (the
+> `titles.py` module referenced below lives on the separate `feature/duplicate-fix`
+> branch and isn't present here). Behaviour is equivalent for label matching.
 
 ## Problem
 

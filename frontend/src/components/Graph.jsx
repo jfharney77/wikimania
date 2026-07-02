@@ -12,15 +12,27 @@ function communityColor(communityId) {
 }
 
 const GRADE_COLOR = { A: '#34d399', B: '#a3e635', C: '#f59e0b', D: '#fb7185', F: '#f87171' }
+const PATH_COLOR = '#f59e0b'
+
+const idOf = x => (typeof x === 'object' && x !== null ? x.id : x)
+const edgeKey = (a, b) => [a, b].sort().join('|')
 
 export default function Graph({ wikiId, onNodeClick }) {
   const [graphData, setGraphData] = useState(null)
   const [evalData, setEvalData] = useState(null)
   const [message, setMessage] = useState('')
+  const [source, setSource] = useState('')
+  const [target, setTarget] = useState('')
+  const [pathResult, setPathResult] = useState(null)
+  const [pathErr, setPathErr] = useState('')
   const containerRef = useRef()
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 })
 
-  useEffect(() => { setGraphData(null); setEvalData(null); fetchGraph(); fetchEval() }, [wikiId])
+  useEffect(() => {
+    setGraphData(null); setEvalData(null)
+    setSource(''); setTarget(''); setPathResult(null); setPathErr('')
+    fetchGraph(); fetchEval()
+  }, [wikiId])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -63,21 +75,66 @@ export default function Graph({ wikiId, onNodeClick }) {
     } catch { /* eval is best-effort; ignore failures */ }
   }
 
+  async function findPath() {
+    setPathErr(''); setPathResult(null)
+    if (!source || !target) { setPathErr('Pick a source and a target.'); return }
+    try {
+      const q = `source=${encodeURIComponent(source)}&target=${encodeURIComponent(target)}`
+      const r = await apiFetch('GET', `/api/wikis/${wikiId}/graph/path?${q}`)
+      const d = await r.json()
+      if (!r.ok) { setPathErr(d.detail ?? 'Path lookup failed.'); return }
+      if (!d.path) { setPathErr(d.message ?? 'No graph yet.'); return }
+      setPathResult(d.path)
+      if (!d.path.found) setPathErr('No path — these concepts are not connected.')
+    } catch {
+      setPathErr('Path lookup failed.')
+    }
+  }
+
+  function clearPath() {
+    setSource(''); setTarget(''); setPathResult(null); setPathErr('')
+  }
+
+  const pathIds = pathResult?.found ? new Set(pathResult.nodes.map(n => n.id)) : null
+  const pathEdges = pathResult?.found
+    ? new Set(pathResult.edges.map(e => edgeKey(e.source, e.target)))
+    : null
+
   const nodeCanvasObject = useCallback((node, ctx, globalScale) => {
     const fontSize = Math.max(10, 14 / globalScale)
-    const r = 6
+    const onPath = pathIds?.has(node.id)
+    const dim = pathIds && !onPath
+    const r = onPath ? 8 : 6
+
+    ctx.globalAlpha = dim ? 0.25 : 1
     ctx.beginPath()
     ctx.arc(node.x, node.y, r, 0, 2 * Math.PI)
-    ctx.fillStyle = communityColor(node.community)
+    ctx.fillStyle = onPath ? PATH_COLOR : communityColor(node.community)
     ctx.fill()
+    if (onPath) {
+      ctx.lineWidth = 2
+      ctx.strokeStyle = '#fff'
+      ctx.stroke()
+    }
 
-    if (globalScale > 1.2) {
-      ctx.font = `${fontSize}px Inter, sans-serif`
+    if (onPath || globalScale > 1.2) {
+      ctx.font = `${onPath ? 'bold ' : ''}${fontSize}px Inter, sans-serif`
       ctx.textAlign = 'center'
-      ctx.fillStyle = '#e2e8f0'
+      ctx.fillStyle = onPath ? '#fff' : '#e2e8f0'
       ctx.fillText(node.label, node.x, node.y + r + fontSize)
     }
-  }, [])
+    ctx.globalAlpha = 1
+  }, [pathIds])
+
+  const linkColor = useCallback(link => {
+    if (!pathEdges) return '#2e3350'
+    return pathEdges.has(edgeKey(idOf(link.source), idOf(link.target))) ? PATH_COLOR : '#181b24'
+  }, [pathEdges])
+
+  const linkWidth = useCallback(link => {
+    if (!pathEdges) return 1
+    return pathEdges.has(edgeKey(idOf(link.source), idOf(link.target))) ? 3 : 1
+  }, [pathEdges])
 
   const handleNodeClick = useCallback(node => {
     const m = String(node.id).match(/article_(\d+)/)
@@ -86,6 +143,10 @@ export default function Graph({ wikiId, onNodeClick }) {
 
   const communities = graphData
     ? [...new Set(graphData.nodes.map(n => n.community))].sort((a, b) => a - b)
+    : []
+
+  const sortedNodes = graphData
+    ? [...graphData.nodes].sort((a, b) => a.label.localeCompare(b.label))
     : []
 
   return (
@@ -104,8 +165,8 @@ export default function Graph({ wikiId, onNodeClick }) {
             graphData={graphData}
             nodeCanvasObject={nodeCanvasObject}
             nodeCanvasObjectMode={() => 'replace'}
-            linkColor={() => '#2e3350'}
-            linkWidth={1}
+            linkColor={linkColor}
+            linkWidth={linkWidth}
             backgroundColor="#0f1117"
             onNodeClick={handleNodeClick}
             nodeLabel={node => node.label}
@@ -132,6 +193,37 @@ export default function Graph({ wikiId, onNodeClick }) {
               </div>
             </div>
           )}
+
+          <div className="graph-path">
+            <h4>Shortest path</h4>
+            <select value={source} onChange={e => setSource(e.target.value)}>
+              <option value="">From…</option>
+              {sortedNodes.map(n => <option key={n.id} value={n.id}>{n.label}</option>)}
+            </select>
+            <select value={target} onChange={e => setTarget(e.target.value)}>
+              <option value="">To…</option>
+              {sortedNodes.map(n => <option key={n.id} value={n.id}>{n.label}</option>)}
+            </select>
+            <div className="graph-path-btns">
+              <button onClick={findPath}>Find path</button>
+              <button className="secondary" onClick={clearPath}>Clear</button>
+            </div>
+            {pathErr && <div className="graph-path-msg">{pathErr}</div>}
+            {pathResult?.found && (
+              <div className="graph-path-result">
+                <div className="graph-path-hops">{pathResult.length} hop{pathResult.length === 1 ? '' : 's'}</div>
+                <div className="graph-path-chain">
+                  {pathResult.nodes.map((n, i) => (
+                    <span key={n.id}>
+                      {i > 0 && <span className="graph-path-arrow"> → </span>}
+                      {n.label}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
           {communities.length > 0 && (
             <div className="graph-legend">
               <h4>Communities</h4>

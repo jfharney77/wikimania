@@ -45,31 +45,14 @@ validate-backend:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
-.railway-auth: &railway-auth
-  - npm install -g @railway/cli
-  - mkdir -p ~/.railway
-  - |
-    cat > ~/.railway/config.json <<EOF
-    {
-      "projects": {},
-      "user": {
-        "token": null,
-        "accessToken": "$RAILWAY_ACCESS_TOKEN",
-        "refreshToken": "$RAILWAY_REFRESH_TOKEN",
-        "tokenExpiresAt": 9999999999
-      },
-      "linkedFunctions": null
-    }
-    EOF
-  - railway whoami
-
 deploy-backend-railway:
   stage: deploy
   image: node:20
   needs: [validate-backend]
   script:
-    - *railway-auth
-    - railway up --service wikimania-backend --environment production --project $RAILWAY_PROJECT_ID
+    - npm install -g @railway/cli
+    - railway status
+    - railway up --service wikimania-backend
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
@@ -78,9 +61,10 @@ deploy-frontend-railway:
   image: node:20
   needs: [validate-frontend]
   script:
-    - *railway-auth
+    - npm install -g @railway/cli
+    - railway status
     - rm -rf frontend/dist
-    - railway up --service wikimania-frontend --environment production --project $RAILWAY_PROJECT_ID
+    - railway up --service wikimania-frontend
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 

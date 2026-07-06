@@ -15,6 +15,8 @@ React (Vite) frontend + FastAPI backend. The Vite dev server proxies `/api/*` to
 - **graphify used as a Python library** — after every upload, `pipeline.py` imports `graphify.build`, `graphify.cluster`, `graphify.export` directly (no subprocess). The resulting graph JSON is stored in the `graph_snapshots` table.
 - **Obsidian-compatible wikilinks** — articles are stored as markdown with `[[Article Title]]` syntax. `GET /api/wiki/export` zips all articles for download as an Obsidian vault.
 - **No embeddings / vector search** — queries use PostgreSQL `ILIKE` to find relevant articles, then pass them to the reasoning LLM.
+- **All ingestion goes through the `IngestItem` contract** (`ingest.py`) — identity is `(wiki_id, source, source_id)`, so re-ingesting is an update, never a duplicate. See `docs/INGESTION.md`.
+- **Gmail is a first-class document source** — `gmail_client.py` (OAuth `gmail.readonly` over httpx, token refresh + backoff), `email_clean.py` (pure heuristics: HTML→text, quote/signature stripping, redaction, forward parsing), `email_ingest.py` (thread→page mapping, attachments, entities, newsletters, purge), `gmail_sync.py` (background poller for the configured label and the `+wiki` alias). Email pages, person/org/project pages, newsletter rollups and attachment pages are deterministic (`wiki_articles.kind` ≠ `article`); topic enrichment still runs through the ordinary LLM pipeline.
 
 ## Running locally
 
@@ -67,6 +69,18 @@ OLLAMA_BASE_URL=http://172.30.48.1:11434
 | GET | `/api/wiki/export` | Download Obsidian vault zip |
 | POST | `/api/wikis/{id}/critic` | Run critic agent (merges duplicates, fixes contradictions) → job_id |
 | POST | `/api/wikis/{id}/brainstorm` | Run read-only brainstorm agent in a `mode` (`stability`/`conflicts`/`ideas`) → job_id |
+| GET | `/api/wikis/{id}/gmail/auth-url` | Start Gmail OAuth (returns Google consent URL) |
+| GET | `/api/gmail/oauth/callback` | OAuth redirect target (public; state is a signed JWT) |
+| GET/PATCH/DELETE | `/api/wikis/{id}/gmail`, `/gmail/status`, `/gmail/settings` | Connection status, label/sync settings, disconnect |
+| GET | `/api/wikis/{id}/gmail/threads?q=` | Browse/search recent Gmail threads |
+| POST | `/api/wikis/{id}/gmail/threads/{tid}/import` | Import a thread to the wiki (idempotent) |
+| POST | `/api/wikis/{id}/gmail/sync` | Run a sync cycle now (label + `+wiki` alias) |
+| GET | `/api/wikis/{id}/email/status` | Sync log + ingested threads |
+| GET | `/api/wikis/{id}/email/metrics` | Items/day, dedupe hits, errors |
+| GET | `/api/wikis/{id}/email/search?sender=&after=&before=&has_attachment=&topic=&q=` | Filtered search over email-derived pages |
+| GET/POST/DELETE | `/api/wikis/{id}/email/denylist[/{entry_id}]` | Per-sender never-ingest denylist |
+| POST | `/api/wikis/{id}/email/purge-sender` | Remove all content from a sender + orphaned entities |
+| DELETE | `/api/wikis/{id}/articles/{article_id}` | Delete a page (email pages cascade to docs/attachments/orphaned entities) |
 
 ## SSE event types
 
@@ -89,3 +103,8 @@ OLLAMA_BASE_URL=http://172.30.48.1:11434
 - `generation_jobs` — job status + error log
 - `job_events` — durable SSE event log (one row per event, ordered by per-job `seq`); the `/api/jobs/{id}/stream` endpoint polls this table instead of an in-process queue, so progress survives restarts and works across worker processes
 - `graph_snapshots` — graphify JSON output (latest is served to frontend)
+- `gmail_accounts` — per-wiki OAuth tokens, watched label, sync state (persisted historyId)
+- `email_threads` — thread ↔ page mapping + ingested message ids (idempotent, restart-safe sync)
+- `email_sync_log` — status view + metrics source (ingested/updated/dedupe/denied/error/purged)
+- `entities` / `entity_mentions` — people/orgs/projects and which documents mention them
+- `email_denylist` — per-sender never-ingest patterns

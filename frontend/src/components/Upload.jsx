@@ -141,7 +141,18 @@ export default function Upload({ wikiId }) {
       form.append('parallel_writes', parallelWrites)
       const r = await apiFetch('POST', `/api/wikis/${wikiId}/documents/upload`, form)
       if (!r.ok) { const e = await r.json(); throw new Error(e.detail ?? 'Upload failed') }
-      const { job_id } = await r.json()
+      const { job_id, action } = await r.json()
+
+      if (!job_id) {
+        // Idempotent re-ingest: identical content was already ingested.
+        stopTimer()
+        setPhase('Done.')
+        addEvent({ cls: 'ev-done', text: `✓ "${file.name}" is already ingested and unchanged — nothing to do (${action ?? 'unchanged'}).` })
+        setFile(null)
+        setUploading(false)
+        fetchDocs()
+        return
+      }
 
       if ('Notification' in window && Notification.permission === 'default') {
         Notification.requestPermission()

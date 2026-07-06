@@ -121,6 +121,117 @@ async def init_pool(database_url: str):
             END $$;
         """)
 
+        # ── IngestItem contract (Phase 0) ─────────────────────────────────────
+        # Every ingested item carries (source, source_id) so re-ingesting is an
+        # update, never a duplicate. Plain uploads use source='upload'.
+        await conn.execute("ALTER TABLE source_documents ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'upload'")
+        await conn.execute("ALTER TABLE source_documents ADD COLUMN IF NOT EXISTS source_id TEXT")
+        await conn.execute("ALTER TABLE source_documents ADD COLUMN IF NOT EXISTS author TEXT")
+        await conn.execute("ALTER TABLE source_documents ADD COLUMN IF NOT EXISTS doc_date TIMESTAMPTZ")
+        await conn.execute("ALTER TABLE source_documents ADD COLUMN IF NOT EXISTS metadata TEXT NOT NULL DEFAULT '{}'")
+        await conn.execute("ALTER TABLE source_documents ADD COLUMN IF NOT EXISTS parent_doc_id INT REFERENCES source_documents(id) ON DELETE CASCADE")
+        # Backfill identity for rows that predate the contract so re-ingesting
+        # them updates instead of duplicating. If historical duplicates exist
+        # for a (wiki_id, filename), only the newest row gets the identity key
+        # (the unique index below would otherwise reject the backfill).
+        await conn.execute("""
+            UPDATE source_documents s SET source_id = s.filename
+            WHERE s.source_id IS NULL AND s.source = 'upload' AND s.id = (
+                SELECT max(s2.id) FROM source_documents s2
+                WHERE s2.wiki_id IS NOT DISTINCT FROM s.wiki_id
+                  AND s2.filename = s.filename AND s2.source_id IS NULL AND s2.source = 'upload'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM source_documents s3
+                WHERE s3.wiki_id IS NOT DISTINCT FROM s.wiki_id
+                  AND s3.source = 'upload' AND s3.source_id = s.filename
+            )
+        """)
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS source_documents_source_key
+            ON source_documents (wiki_id, source, source_id) WHERE source_id IS NOT NULL
+        """)
+
+        # Article kinds distinguish LLM topic articles from deterministic
+        # email/person/newsletter pages.
+        await conn.execute("ALTER TABLE wiki_articles ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'article'")
+        await conn.execute("ALTER TABLE wiki_articles ADD COLUMN IF NOT EXISTS source_doc_id INT REFERENCES source_documents(id) ON DELETE SET NULL")
+
+        # ── Gmail ingestion (Phases 1-5) ──────────────────────────────────────
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS gmail_accounts (
+                id            SERIAL PRIMARY KEY,
+                wiki_id       INT UNIQUE REFERENCES wikis(id) ON DELETE CASCADE,
+                email         TEXT NOT NULL,
+                access_token  TEXT NOT NULL,
+                refresh_token TEXT,
+                token_expiry  TIMESTAMPTZ,
+                label_name    TEXT NOT NULL DEFAULT 'wiki',
+                sync_enabled  BOOLEAN NOT NULL DEFAULT true,
+                history_id    TEXT,
+                last_sync_at  TIMESTAMPTZ,
+                last_error    TEXT,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS email_threads (
+                id              SERIAL PRIMARY KEY,
+                wiki_id         INT REFERENCES wikis(id) ON DELETE CASCADE,
+                thread_id       TEXT NOT NULL,
+                subject         TEXT,
+                sender          TEXT,
+                participants    TEXT NOT NULL DEFAULT '[]',
+                doc_id          INT REFERENCES source_documents(id) ON DELETE SET NULL,
+                article_id      INT REFERENCES wiki_articles(id) ON DELETE SET NULL,
+                message_ids     TEXT NOT NULL DEFAULT '[]',
+                is_newsletter   BOOLEAN NOT NULL DEFAULT false,
+                has_attachments BOOLEAN NOT NULL DEFAULT false,
+                gmail_link      TEXT,
+                last_message_at TIMESTAMPTZ,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (wiki_id, thread_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS email_sync_log (
+                id         SERIAL PRIMARY KEY,
+                wiki_id    INT REFERENCES wikis(id) ON DELETE CASCADE,
+                thread_id  TEXT,
+                action     TEXT NOT NULL,
+                detail     TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS entities (
+                id         SERIAL PRIMARY KEY,
+                wiki_id    INT REFERENCES wikis(id) ON DELETE CASCADE,
+                kind       TEXT NOT NULL,
+                name       TEXT NOT NULL,
+                email      TEXT,
+                article_id INT REFERENCES wiki_articles(id) ON DELETE SET NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (wiki_id, kind, name)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS entity_mentions (
+                entity_id INT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+                doc_id    INT NOT NULL REFERENCES source_documents(id) ON DELETE CASCADE,
+                PRIMARY KEY (entity_id, doc_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS email_denylist (
+                id         SERIAL PRIMARY KEY,
+                wiki_id    INT REFERENCES wikis(id) ON DELETE CASCADE,
+                pattern    TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (wiki_id, pattern)
+            )
+        """)
+
 
 async def close_pool():
     global _pool
@@ -230,13 +341,51 @@ async def delete_wiki(wiki_id: int) -> int:
 # Documents
 # ---------------------------------------------------------------------------
 
-async def save_document(wiki_id: int, filename: str, content: str) -> int:
+async def upsert_source_document(
+    wiki_id: int,
+    source: str,
+    source_id: str,
+    filename: str,
+    content: str,
+    author: str | None = None,
+    doc_date=None,
+    metadata: dict | None = None,
+    parent_doc_id: int | None = None,
+) -> tuple[int, str]:
+    """Idempotent ingest: (wiki_id, source, source_id) is the identity key.
+
+    Returns (doc_id, action) where action is 'created', 'updated' or 'unchanged'.
+    """
+    meta_json = json.dumps(metadata or {}, default=str)
     async with get_pool().acquire() as conn:
-        row = await conn.fetchrow(
-            "INSERT INTO source_documents (wiki_id, filename, content) VALUES ($1, $2, $3) RETURNING id",
-            wiki_id, filename, content,
+        existing = await conn.fetchrow(
+            "SELECT id, content, status FROM source_documents WHERE wiki_id=$1 AND source=$2 AND source_id=$3",
+            wiki_id, source, source_id,
         )
-        return row["id"]
+        if existing:
+            # Archived (wiki was reset) or errored docs need reprocessing even
+            # when the content is byte-identical.
+            if existing["content"] == content and existing["status"] not in ("archived", "error"):
+                await conn.execute(
+                    "UPDATE source_documents SET metadata=$1 WHERE id=$2",
+                    meta_json, existing["id"],
+                )
+                return existing["id"], "unchanged"
+            await conn.execute(
+                """UPDATE source_documents
+                   SET filename=$1, content=$2, author=$3, doc_date=$4, metadata=$5,
+                       status='pending', uploaded_at=now()
+                   WHERE id=$6""",
+                filename, content, author, doc_date, meta_json, existing["id"],
+            )
+            return existing["id"], "updated"
+        row = await conn.fetchrow(
+            """INSERT INTO source_documents
+               (wiki_id, source, source_id, filename, content, author, doc_date, metadata, parent_doc_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id""",
+            wiki_id, source, source_id, filename, content, author, doc_date, meta_json, parent_doc_id,
+        )
+        return row["id"], "created"
 
 
 async def set_document_status(doc_id: int, status: str):
@@ -257,10 +406,25 @@ async def get_document(doc_id: int) -> dict | None:
 async def list_documents(wiki_id: int) -> list[dict]:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, filename, uploaded_at, status FROM source_documents WHERE wiki_id=$1 ORDER BY uploaded_at DESC",
+            "SELECT id, filename, source, source_id, author, uploaded_at, status FROM source_documents WHERE wiki_id=$1 ORDER BY uploaded_at DESC",
             wiki_id,
         )
         return [dict(r) for r in rows]
+
+
+async def list_child_documents(parent_doc_id: int) -> list[dict]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, filename, source, source_id FROM source_documents WHERE parent_doc_id=$1",
+            parent_doc_id,
+        )
+        return [dict(r) for r in rows]
+
+
+async def delete_document(doc_id: int):
+    """Delete a source document (children cascade via parent_doc_id FK)."""
+    async with get_pool().acquire() as conn:
+        await conn.execute("DELETE FROM source_documents WHERE id=$1", doc_id)
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +526,13 @@ async def get_job_events_after(job_id: int, after_seq: int) -> list[dict]:
 # Wiki articles
 # ---------------------------------------------------------------------------
 
-async def upsert_article(wiki_id: int, title: str, content: str) -> tuple[int, bool]:
+async def upsert_article(
+    wiki_id: int,
+    title: str,
+    content: str,
+    kind: str = "article",
+    source_doc_id: int | None = None,
+) -> tuple[int, bool]:
     async with get_pool().acquire() as conn:
         existing = await conn.fetchrow(
             "SELECT id FROM wiki_articles WHERE wiki_id=$1 AND title=$2", wiki_id, title
@@ -375,10 +545,41 @@ async def upsert_article(wiki_id: int, title: str, content: str) -> tuple[int, b
             return existing["id"], False
         else:
             row = await conn.fetchrow(
-                "INSERT INTO wiki_articles (wiki_id, title, content) VALUES ($1, $2, $3) RETURNING id",
-                wiki_id, title, content,
+                "INSERT INTO wiki_articles (wiki_id, title, content, kind, source_doc_id) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+                wiki_id, title, content, kind, source_doc_id,
             )
             return row["id"], True
+
+
+async def update_article_content(article_id: int, content: str):
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE wiki_articles SET content=$1, updated_at=now() WHERE id=$2",
+            content, article_id,
+        )
+
+
+async def get_article_by_title(wiki_id: int, title: str) -> dict | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, title, content, kind, source_doc_id FROM wiki_articles WHERE wiki_id=$1 AND title=$2",
+            wiki_id, title,
+        )
+        return dict(row) if row else None
+
+
+async def get_article_by_source_doc(wiki_id: int, doc_id: int) -> dict | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, title, content, kind, source_doc_id FROM wiki_articles WHERE wiki_id=$1 AND source_doc_id=$2",
+            wiki_id, doc_id,
+        )
+        return dict(row) if row else None
+
+
+async def delete_article_by_id(article_id: int):
+    async with get_pool().acquire() as conn:
+        await conn.execute("DELETE FROM wiki_articles WHERE id=$1", article_id)
 
 
 async def get_article_content(wiki_id: int, title: str) -> str | None:
@@ -392,7 +593,7 @@ async def get_article_content(wiki_id: int, title: str) -> str | None:
 async def list_articles(wiki_id: int) -> list[dict]:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, title, created_at, updated_at FROM wiki_articles WHERE wiki_id=$1 ORDER BY title",
+            "SELECT id, title, kind, created_at, updated_at FROM wiki_articles WHERE wiki_id=$1 ORDER BY title",
             wiki_id,
         )
         return [dict(r) for r in rows]
@@ -401,7 +602,7 @@ async def list_articles(wiki_id: int) -> list[dict]:
 async def get_article_by_id(article_id: int) -> dict | None:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, title, content, created_at, updated_at FROM wiki_articles WHERE id=$1",
+            "SELECT id, wiki_id, title, content, kind, source_doc_id, created_at, updated_at FROM wiki_articles WHERE id=$1",
             article_id,
         )
         return dict(row) if row else None
@@ -513,6 +714,402 @@ async def get_latest_graph(wiki_id: int) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Gmail accounts (OAuth tokens + sync settings)
+# ---------------------------------------------------------------------------
+
+async def upsert_gmail_account(
+    wiki_id: int,
+    email: str,
+    access_token: str,
+    refresh_token: str | None,
+    token_expiry,
+) -> dict:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO gmail_accounts (wiki_id, email, access_token, refresh_token, token_expiry)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (wiki_id) DO UPDATE SET
+                   email=EXCLUDED.email,
+                   access_token=EXCLUDED.access_token,
+                   refresh_token=COALESCE(EXCLUDED.refresh_token, gmail_accounts.refresh_token),
+                   token_expiry=EXCLUDED.token_expiry,
+                   last_error=NULL
+               RETURNING *""",
+            wiki_id, email, access_token, refresh_token, token_expiry,
+        )
+        return dict(row)
+
+
+async def get_gmail_account(wiki_id: int) -> dict | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM gmail_accounts WHERE wiki_id=$1", wiki_id)
+        return dict(row) if row else None
+
+
+async def list_gmail_accounts(sync_enabled_only: bool = False) -> list[dict]:
+    async with get_pool().acquire() as conn:
+        q = "SELECT * FROM gmail_accounts"
+        if sync_enabled_only:
+            q += " WHERE sync_enabled"
+        rows = await conn.fetch(q + " ORDER BY id")
+        return [dict(r) for r in rows]
+
+
+async def update_gmail_tokens(account_id: int, access_token: str, token_expiry):
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE gmail_accounts SET access_token=$1, token_expiry=$2 WHERE id=$3",
+            access_token, token_expiry, account_id,
+        )
+
+
+async def update_gmail_settings(wiki_id: int, label_name: str | None, sync_enabled: bool | None) -> dict | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE gmail_accounts
+               SET label_name=COALESCE($1, label_name),
+                   sync_enabled=COALESCE($2, sync_enabled)
+               WHERE wiki_id=$3 RETURNING *""",
+            label_name, sync_enabled, wiki_id,
+        )
+        return dict(row) if row else None
+
+
+async def update_gmail_sync_state(account_id: int, history_id: str | None = None, error: str | None = None):
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            """UPDATE gmail_accounts
+               SET history_id=COALESCE($1, history_id), last_sync_at=now(), last_error=$2
+               WHERE id=$3""",
+            history_id, error, account_id,
+        )
+
+
+async def delete_gmail_account(wiki_id: int) -> bool:
+    async with get_pool().acquire() as conn:
+        result = await conn.execute("DELETE FROM gmail_accounts WHERE wiki_id=$1", wiki_id)
+        return result == "DELETE 1"
+
+
+# ---------------------------------------------------------------------------
+# Email threads (thread ↔ wiki page mapping; persisted sync state)
+# ---------------------------------------------------------------------------
+
+async def upsert_email_thread(
+    wiki_id: int,
+    thread_id: str,
+    subject: str,
+    sender: str | None,
+    participants: list[str],
+    doc_id: int | None,
+    article_id: int | None,
+    message_ids: list[str],
+    is_newsletter: bool,
+    has_attachments: bool,
+    gmail_link: str | None,
+    last_message_at,
+) -> dict:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO email_threads
+               (wiki_id, thread_id, subject, sender, participants, doc_id, article_id,
+                message_ids, is_newsletter, has_attachments, gmail_link, last_message_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+               ON CONFLICT (wiki_id, thread_id) DO UPDATE SET
+                   subject=EXCLUDED.subject,
+                   sender=EXCLUDED.sender,
+                   participants=EXCLUDED.participants,
+                   doc_id=EXCLUDED.doc_id,
+                   article_id=EXCLUDED.article_id,
+                   message_ids=EXCLUDED.message_ids,
+                   is_newsletter=EXCLUDED.is_newsletter,
+                   has_attachments=EXCLUDED.has_attachments,
+                   gmail_link=EXCLUDED.gmail_link,
+                   last_message_at=EXCLUDED.last_message_at,
+                   updated_at=now()
+               RETURNING *""",
+            wiki_id, thread_id, subject, sender, json.dumps(participants),
+            doc_id, article_id, json.dumps(message_ids), is_newsletter,
+            has_attachments, gmail_link, last_message_at,
+        )
+        return dict(row)
+
+
+async def get_email_thread(wiki_id: int, thread_id: str) -> dict | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM email_threads WHERE wiki_id=$1 AND thread_id=$2", wiki_id, thread_id
+        )
+        return dict(row) if row else None
+
+
+async def list_email_threads(wiki_id: int) -> list[dict]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM email_threads WHERE wiki_id=$1 ORDER BY last_message_at DESC NULLS LAST",
+            wiki_id,
+        )
+        return [dict(r) for r in rows]
+
+
+async def list_email_threads_by_sender(wiki_id: int, sender: str) -> list[dict]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM email_threads WHERE wiki_id=$1 AND lower(sender)=lower($2)",
+            wiki_id, sender,
+        )
+        return [dict(r) for r in rows]
+
+
+async def delete_email_thread(thread_row_id: int):
+    async with get_pool().acquire() as conn:
+        await conn.execute("DELETE FROM email_threads WHERE id=$1", thread_row_id)
+
+
+async def get_email_thread_by_article(article_id: int) -> dict | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM email_threads WHERE article_id=$1", article_id)
+        return dict(row) if row else None
+
+
+async def get_email_links_for_articles(article_ids: list[int]) -> dict[int, str]:
+    """Map article_id → Gmail deep link, for query-answer citations."""
+    if not article_ids:
+        return {}
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT article_id, gmail_link FROM email_threads WHERE article_id = ANY($1::int[])",
+            article_ids,
+        )
+        return {r["article_id"]: r["gmail_link"] for r in rows if r["gmail_link"]}
+
+
+async def search_email_threads(
+    wiki_id: int,
+    q: str | None = None,
+    sender: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
+    has_attachment: bool | None = None,
+    topic: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """Filtered search across email-derived pages (Phase 4)."""
+    conds = ["t.wiki_id = $1"]
+    params: list = [wiki_id]
+
+    def _add(cond_tpl: str, value):
+        params.append(value)
+        conds.append(cond_tpl.format(n=len(params)))
+
+    if sender:
+        _add("(t.sender ILIKE ${n} OR t.participants ILIKE ${n})", f"%{sender}%")
+    if after:
+        _add("t.last_message_at >= ${n}::timestamptz", after)
+    if before:
+        _add("t.last_message_at <= ${n}::timestamptz", before)
+    if has_attachment is not None:
+        _add("t.has_attachments = ${n}", has_attachment)
+    if q:
+        _add("(t.subject ILIKE ${n} OR a.content ILIKE ${n})", f"%{q}%")
+    if topic:
+        _add(
+            "(EXISTS (SELECT 1 FROM article_links al WHERE al.from_id = t.article_id AND al.to_title ILIKE ${n}) "
+            "OR a.content ILIKE ${n})",
+            f"%{topic}%",
+        )
+
+    query = f"""
+        SELECT t.id, t.thread_id, t.subject, t.sender, t.participants, t.article_id,
+               t.is_newsletter, t.has_attachments, t.gmail_link, t.last_message_at,
+               a.title AS article_title
+        FROM email_threads t
+        LEFT JOIN wiki_articles a ON a.id = t.article_id
+        WHERE {' AND '.join(conds)}
+        ORDER BY t.last_message_at DESC NULLS LAST
+        LIMIT {int(limit)}
+    """
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(query, *params)
+        return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Email sync log + metrics
+# ---------------------------------------------------------------------------
+
+async def add_sync_log(wiki_id: int, thread_id: str | None, action: str, detail: str = ""):
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "INSERT INTO email_sync_log (wiki_id, thread_id, action, detail) VALUES ($1, $2, $3, $4)",
+            wiki_id, thread_id, action, detail,
+        )
+
+
+async def get_sync_log(wiki_id: int, limit: int = 50) -> list[dict]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, thread_id, action, detail, created_at FROM email_sync_log "
+            "WHERE wiki_id=$1 ORDER BY created_at DESC LIMIT $2",
+            wiki_id, limit,
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_email_metrics(wiki_id: int, days: int = 7) -> dict:
+    """Items ingested/day, dedupe hits, errors — Phase 5 metrics."""
+    async with get_pool().acquire() as conn:
+        per_day = await conn.fetch(
+            """SELECT date_trunc('day', created_at)::date AS day, action, COUNT(*) AS count
+               FROM email_sync_log
+               WHERE wiki_id=$1 AND created_at > now() - ($2 || ' days')::interval
+               GROUP BY 1, 2 ORDER BY 1 DESC""",
+            wiki_id, str(days),
+        )
+        totals = await conn.fetch(
+            "SELECT action, COUNT(*) AS count FROM email_sync_log WHERE wiki_id=$1 GROUP BY action",
+            wiki_id,
+        )
+        threads = await conn.fetchval("SELECT COUNT(*) FROM email_threads WHERE wiki_id=$1", wiki_id)
+        return {
+            "per_day": [dict(r) for r in per_day],
+            "totals": {r["action"]: r["count"] for r in totals},
+            "threads_tracked": threads,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Entities (people / organizations / projects) — Phase 3
+# ---------------------------------------------------------------------------
+
+async def upsert_entity(wiki_id: int, kind: str, name: str, email: str | None = None) -> dict:
+    async with get_pool().acquire() as conn:
+        # Merge by email first (a person renamed in a signature is still the same person).
+        if email:
+            existing = await conn.fetchrow(
+                "SELECT * FROM entities WHERE wiki_id=$1 AND kind=$2 AND lower(email)=lower($3)",
+                wiki_id, kind, email,
+            )
+            if existing:
+                return dict(existing)
+        row = await conn.fetchrow(
+            """INSERT INTO entities (wiki_id, kind, name, email) VALUES ($1, $2, $3, $4)
+               ON CONFLICT (wiki_id, kind, name) DO UPDATE SET
+                   email=COALESCE(entities.email, EXCLUDED.email)
+               RETURNING *""",
+            wiki_id, kind, name, email,
+        )
+        return dict(row)
+
+
+async def set_entity_article(entity_id: int, article_id: int):
+    async with get_pool().acquire() as conn:
+        await conn.execute("UPDATE entities SET article_id=$1 WHERE id=$2", article_id, entity_id)
+
+
+async def add_entity_mention(entity_id: int, doc_id: int):
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "INSERT INTO entity_mentions (entity_id, doc_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            entity_id, doc_id,
+        )
+
+
+async def get_entity(entity_id: int) -> dict | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM entities WHERE id=$1", entity_id)
+        return dict(row) if row else None
+
+
+async def list_entities(wiki_id: int, kind: str | None = None) -> list[dict]:
+    async with get_pool().acquire() as conn:
+        if kind:
+            rows = await conn.fetch(
+                "SELECT * FROM entities WHERE wiki_id=$1 AND kind=$2 ORDER BY name", wiki_id, kind
+            )
+        else:
+            rows = await conn.fetch("SELECT * FROM entities WHERE wiki_id=$1 ORDER BY kind, name", wiki_id)
+        return [dict(r) for r in rows]
+
+
+async def get_entity_threads(entity_id: int) -> list[dict]:
+    """Email threads an entity appears in (via entity_mentions → doc → thread)."""
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT DISTINCT t.subject, t.gmail_link, t.last_message_at, a.title AS article_title
+               FROM entity_mentions em
+               JOIN email_threads t ON t.doc_id = em.doc_id
+               LEFT JOIN wiki_articles a ON a.id = t.article_id
+               WHERE em.entity_id = $1
+               ORDER BY t.last_message_at DESC NULLS LAST""",
+            entity_id,
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_entities_for_doc(doc_id: int) -> list[dict]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT e.* FROM entities e
+               JOIN entity_mentions em ON em.entity_id = e.id
+               WHERE em.doc_id = $1""",
+            doc_id,
+        )
+        return [dict(r) for r in rows]
+
+
+async def remove_mentions_for_doc(doc_id: int):
+    async with get_pool().acquire() as conn:
+        await conn.execute("DELETE FROM entity_mentions WHERE doc_id=$1", doc_id)
+
+
+async def delete_orphan_entities(wiki_id: int) -> list[dict]:
+    """Delete entities with no remaining mentions. Returns the deleted rows
+    (so callers can also remove their person/org pages)."""
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """DELETE FROM entities e
+               WHERE e.wiki_id=$1
+                 AND NOT EXISTS (SELECT 1 FROM entity_mentions em WHERE em.entity_id = e.id)
+               RETURNING e.id, e.kind, e.name, e.article_id""",
+            wiki_id,
+        )
+        return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Sender denylist — Phase 5
+# ---------------------------------------------------------------------------
+
+async def list_denylist(wiki_id: int) -> list[dict]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, pattern, created_at FROM email_denylist WHERE wiki_id=$1 ORDER BY pattern",
+            wiki_id,
+        )
+        return [dict(r) for r in rows]
+
+
+async def add_denylist(wiki_id: int, pattern: str) -> dict:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO email_denylist (wiki_id, pattern) VALUES ($1, $2)
+               ON CONFLICT (wiki_id, pattern) DO UPDATE SET pattern=EXCLUDED.pattern
+               RETURNING id, pattern, created_at""",
+            wiki_id, pattern.strip().lower(),
+        )
+        return dict(row)
+
+
+async def remove_denylist(wiki_id: int, entry_id: int) -> bool:
+    async with get_pool().acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM email_denylist WHERE wiki_id=$1 AND id=$2", wiki_id, entry_id
+        )
+        return result == "DELETE 1"
+
+
+# ---------------------------------------------------------------------------
 # Reset (content only — keeps the wiki record)
 # ---------------------------------------------------------------------------
 
@@ -523,6 +1120,8 @@ async def reset_wiki_content(wiki_id: int) -> dict:
         )
         await conn.execute("DELETE FROM wiki_articles WHERE wiki_id=$1", wiki_id)
         await conn.execute("DELETE FROM graph_snapshots WHERE wiki_id=$1", wiki_id)
+        await conn.execute("DELETE FROM email_threads WHERE wiki_id=$1", wiki_id)
+        await conn.execute("DELETE FROM entities WHERE wiki_id=$1", wiki_id)
         await conn.execute(
             "UPDATE source_documents SET status='archived' WHERE wiki_id=$1", wiki_id
         )

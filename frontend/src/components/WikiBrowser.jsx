@@ -59,6 +59,20 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
     URL.revokeObjectURL(url)
   }
 
+  async function handleDeletePage() {
+    if (!article) return
+    const emailDerived = ['email', 'newsletter_issue'].includes(article.kind)
+    const warning = emailDerived
+      ? `Delete "${article.title}"? Its source email documents, attachment pages, and any extracted entities with no other references will also be removed.`
+      : `Delete "${article.title}"?`
+    if (!window.confirm(warning)) return
+    const r = await apiFetch('DELETE', `/api/wikis/${wikiId}/articles/${article.id}`)
+    if (!r.ok) return
+    setArticle(null)
+    onSelect(null)
+    fetchList()
+  }
+
   async function handleReset() {
     const r = await apiFetch('DELETE', `/api/wikis/${wikiId}/content`)
     if (!r.ok) return
@@ -269,6 +283,9 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
               onClick={() => loadArticle(a.id)}
             >
               {a.title}
+              {a.kind && a.kind !== 'article' && (
+                <span className="kind-badge">{a.kind.replace('_', ' ')}</span>
+              )}
             </div>
           ))}
         </div>
@@ -358,9 +375,19 @@ export default function WikiBrowser({ wikiId, selectedId, onSelect }) {
                 {article.content}
               </ReactMarkdown>
             </div>
-            <div className="wiki-export-btn">
+            <div className="wiki-export-btn" style={{ display: 'flex', gap: '0.75rem' }}>
               <button className="btn btn-outline" onClick={handleExport}>
                 Export Obsidian Vault (.zip)
+              </button>
+              <button
+                className="btn btn-outline"
+                style={{ color: 'var(--red)' }}
+                onClick={handleDeletePage}
+                title={['email', 'newsletter_issue'].includes(article.kind)
+                  ? 'Deletes this email page, its source documents, attachments, and orphaned entities'
+                  : 'Delete this page'}
+              >
+                Delete page
               </button>
             </div>
           </div>

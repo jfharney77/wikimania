@@ -30,3 +30,16 @@ def decode_token(token: str) -> dict:
         return jwt.decode(token, _SECRET, algorithms=[_ALGO])
     except JWTError as e:
         raise ValueError(str(e))
+
+
+def create_state_token(data: dict, minutes: int = 15) -> str:
+    """Short-lived signed state (e.g. OAuth CSRF state carrying the wiki id)."""
+    exp = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    return jwt.encode({**data, "exp": exp}, _SECRET, algorithm=_ALGO)
+
+
+def decode_state_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, _SECRET, algorithms=[_ALGO])
+    except JWTError as e:
+        raise ValueError(str(e))

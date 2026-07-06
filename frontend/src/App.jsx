@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import Upload from './components/Upload.jsx'
+import EmailPanel from './components/EmailPanel.jsx'
 import WikiBrowser from './components/WikiBrowser.jsx'
 import Graph from './components/Graph.jsx'
 import Query from './components/Query.jsx'
@@ -8,7 +9,7 @@ import LoginPage from './components/LoginPage.jsx'
 import AdminPanel from './components/AdminPanel.jsx'
 import { getToken, setToken, apiFetch } from './api.js'
 
-const TABS = ['Upload', 'Wiki', 'Graph', 'Query']
+const TABS = ['Upload', 'Email', 'Wiki', 'Graph', 'Query']
 
 export default function App() {
   const [user, setUser] = useState(null)
@@ -129,6 +130,7 @@ export default function App() {
         ) : (
           <>
             {tab === 'Upload' && <Upload wikiId={currentWiki.id} />}
+            {tab === 'Email'  && <EmailPanel wikiId={currentWiki.id} onOpenArticle={openArticle} />}
             {tab === 'Wiki'   && <WikiBrowser wikiId={currentWiki.id} selectedId={selectedArticleId} onSelect={setSelectedArticleId} />}
             {tab === 'Graph'  && <Graph wikiId={currentWiki.id} onNodeClick={openArticle} />}
             {tab === 'Query'  && <Query wikiId={currentWiki.id} onOpenArticle={openArticle} />}

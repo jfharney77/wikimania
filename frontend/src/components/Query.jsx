@@ -60,6 +60,18 @@ export default function Query({ wikiId, onOpenArticle }) {
                   title="Open article"
                 >
                   {s.title}
+                  {s.gmail_url && (
+                    <a
+                      href={s.gmail_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={e => e.stopPropagation()}
+                      title="Open source email in Gmail"
+                      style={{ marginLeft: '0.35rem', textDecoration: 'none' }}
+                    >
+                      ✉
+                    </a>
+                  )}
                 </span>
               ))}
             </div>

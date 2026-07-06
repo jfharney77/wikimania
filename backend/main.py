@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi import Query as QParam
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -27,6 +27,10 @@ import pipeline_critic as _critic_pipeline
 import pipeline_brainstorm as _brainstorm_pipeline
 import graph_eval
 import graph_path as graph_path_mod
+import ingest as ingest_mod
+import gmail_client
+import gmail_sync
+import email_ingest
 
 
 # ---------------------------------------------------------------------------
@@ -46,9 +50,14 @@ async def get_current_user(
     if not t:
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
-        return auth.decode_token(t)
+        payload = auth.decode_token(t)
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+    # Purpose-scoped tokens (e.g. the Gmail OAuth state, which transits
+    # browser URLs) are not session tokens.
+    if payload.get("purpose"):
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return payload
 
 
 async def require_admin(user: dict = Depends(get_current_user)) -> dict:
@@ -85,7 +94,17 @@ async def lifespan(app: FastAPI):
     elif await db.count_users() == 0:
         print("[wikimania] WARNING: No users exist and FIRST_ADMIN_USERNAME/PASSWORD are not set.")
 
+    # Background Gmail label/forward sync (Phase 2/4). Only runs when OAuth
+    # credentials are configured; state persists in Postgres, so it resumes
+    # cleanly across restarts.
+    if gmail_client.is_configured():
+        gmail_sync.start()
+        print(f"[wikimania] Gmail sync loop started (every {gmail_sync.SYNC_INTERVAL}s).")
+    else:
+        print("[wikimania] Gmail sync disabled — set GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET to enable.")
+
     yield
+    await gmail_sync.stop()
     await db.close_pool()
 
 
@@ -268,14 +287,24 @@ async def upload_document(
     if not content.strip():
         raise HTTPException(status_code=400, detail="File is empty.")
 
-    doc_id = await db.save_document(wiki_id=wiki_id, filename=file.filename, content=content)
-    job_id = await db.create_job(wiki_id=wiki_id, doc_id=doc_id)
-
-    asyncio.create_task(
-        wiki_pipeline.generate_wiki(wiki_id, job_id, doc_id, content, parallel_writes=parallel_writes)
+    # Phase 0: all ingestion goes through the IngestItem contract.
+    # (wiki_id, 'upload', filename) is the identity key — re-uploading the same
+    # file updates the existing document instead of duplicating it.
+    item = ingest_mod.IngestItem(
+        source="upload",
+        source_id=file.filename,
+        title=file.filename,
+        body_text=content,
+        metadata={"content_type": file.content_type or "text/markdown"},
     )
+    result = await ingest_mod.ingest_item(wiki_id, item, parallel_writes=parallel_writes)
 
-    return {"job_id": job_id, "doc_id": doc_id, "filename": file.filename}
+    return {
+        "job_id": result.job_id,
+        "doc_id": result.doc_id,
+        "filename": file.filename,
+        "action": result.action,
+    }
 
 
 @app.get("/api/wikis/{wiki_id}/documents")
@@ -375,7 +404,7 @@ async def list_articles(wiki_id: int, _user: dict = Depends(get_current_user)):
 @app.get("/api/wikis/{wiki_id}/articles/{article_id}")
 async def get_article(wiki_id: int, article_id: int, _user: dict = Depends(get_current_user)):
     article = await db.get_article_by_id(article_id)
-    if not article:
+    if not article or article["wiki_id"] != wiki_id:
         raise HTTPException(status_code=404, detail="Article not found.")
     return article
 
@@ -511,6 +540,262 @@ async def _run_brainstorm_task(wiki_id: int, job_id: int, mode: str):
     except Exception as e:
         await db.append_job_event(job_id, {"type": "error", "message": str(e)})
         await db.update_job_status(job_id, "error", str(e))
+
+
+# ---------------------------------------------------------------------------
+# Gmail connection (Phase 1 — OAuth, read-only)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/wikis/{wiki_id}/gmail/auth-url")
+async def gmail_auth_url(wiki_id: int, _user: dict = Depends(get_current_user)):
+    if not gmail_client.is_configured():
+        raise HTTPException(
+            status_code=400,
+            detail="Gmail is not configured — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.",
+        )
+    if not await db.get_wiki(wiki_id):
+        raise HTTPException(status_code=404, detail="Wiki not found.")
+    state = auth.create_state_token({"purpose": "gmail_oauth", "wiki_id": wiki_id})
+    return {"url": gmail_client.auth_url(state)}
+
+
+@app.get("/api/gmail/oauth/callback")
+async def gmail_oauth_callback(code: str = QParam(None), state: str = QParam(None), error: str = QParam(None)):
+    """Public endpoint — Google redirects the user's browser here."""
+    from html import escape as _esc
+
+    def _page(message: str) -> HTMLResponse:
+        return HTMLResponse(
+            f"<html><body style='font-family:sans-serif;padding:2rem'>"
+            f"<p>{message}</p><p>You can close this tab and return to Wikimania.</p>"
+            f"<script>setTimeout(()=>window.close(), 2500)</script></body></html>"
+        )
+
+    if error:
+        return _page(f"Gmail connection failed: {_esc(error)}")
+    if not code or not state:
+        return _page("Gmail connection failed: missing code or state.")
+    try:
+        payload = auth.decode_state_token(state)
+        if payload.get("purpose") != "gmail_oauth":
+            raise ValueError("wrong state purpose")
+        wiki_id = int(payload["wiki_id"])
+    except (ValueError, KeyError, TypeError) as e:
+        return _page(f"Gmail connection failed: invalid state ({_esc(str(e))}).")
+
+    try:
+        tokens = await gmail_client.exchange_code(code)
+        profile = await gmail_client.get_profile_with_token(tokens["access_token"])
+        await db.upsert_gmail_account(
+            wiki_id=wiki_id,
+            email=profile["emailAddress"],
+            access_token=tokens["access_token"],
+            refresh_token=tokens.get("refresh_token"),
+            token_expiry=tokens["expiry"],
+        )
+    except gmail_client.GmailError as e:
+        return _page(f"Gmail connection failed: {_esc(str(e))}")
+
+    return _page(f"Gmail account <strong>{_esc(profile['emailAddress'])}</strong> connected.")
+
+
+@app.get("/api/wikis/{wiki_id}/gmail/status")
+async def gmail_status(wiki_id: int, _user: dict = Depends(get_current_user)):
+    account = await db.get_gmail_account(wiki_id)
+    if not account:
+        return {"connected": False, "configured": gmail_client.is_configured()}
+    return {
+        "connected": True,
+        "configured": True,
+        "email": account["email"],
+        "label_name": account["label_name"],
+        "sync_enabled": account["sync_enabled"],
+        "sync_interval": gmail_sync.SYNC_INTERVAL,
+        "ingest_alias": account["email"].replace("@", f"{email_ingest.INGEST_SUFFIX}@"),
+        "last_sync_at": account["last_sync_at"],
+        "last_error": account["last_error"],
+    }
+
+
+class GmailSettingsRequest(BaseModel):
+    label_name: str | None = None
+    sync_enabled: bool | None = None
+
+
+@app.patch("/api/wikis/{wiki_id}/gmail/settings")
+async def gmail_settings(wiki_id: int, req: GmailSettingsRequest, _user: dict = Depends(get_current_user)):
+    account = await db.update_gmail_settings(wiki_id, req.label_name, req.sync_enabled)
+    if not account:
+        raise HTTPException(status_code=404, detail="No Gmail account connected to this wiki.")
+    return {"label_name": account["label_name"], "sync_enabled": account["sync_enabled"]}
+
+
+@app.delete("/api/wikis/{wiki_id}/gmail")
+async def gmail_disconnect(wiki_id: int, _user: dict = Depends(get_current_user)):
+    if not await db.delete_gmail_account(wiki_id):
+        raise HTTPException(status_code=404, detail="No Gmail account connected to this wiki.")
+    return {"message": "Gmail account disconnected."}
+
+
+async def _require_gmail_account(wiki_id: int) -> dict:
+    account = await db.get_gmail_account(wiki_id)
+    if not account:
+        raise HTTPException(status_code=400, detail="No Gmail account connected to this wiki.")
+    return account
+
+
+# ---------------------------------------------------------------------------
+# Gmail browse + manual import (Phase 1)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/wikis/{wiki_id}/gmail/threads")
+async def gmail_list_threads(
+    wiki_id: int,
+    q: str = QParam(""),
+    page_token: str = QParam(None),
+    _user: dict = Depends(get_current_user),
+):
+    account = await _require_gmail_account(wiki_id)
+    try:
+        data = await gmail_client.list_threads(account, q=q, max_results=15, page_token=page_token)
+    except gmail_client.GmailError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    imported = {t["thread_id"]: t for t in await db.list_email_threads(wiki_id)}
+    threads = []
+    for t in data.get("threads", []):
+        try:
+            meta = await gmail_client.get_thread(account, t["id"], fmt="metadata")
+            msgs = meta.get("messages", [])
+            headers = {
+                h["name"].lower(): h.get("value", "")
+                for h in (msgs[0].get("payload", {}).get("headers", []) if msgs else [])
+            }
+            threads.append({
+                "thread_id": t["id"],
+                "subject": headers.get("subject", "(no subject)"),
+                "from": headers.get("from", ""),
+                "date": headers.get("date", ""),
+                "message_count": len(msgs),
+                "snippet": t.get("snippet", ""),
+                "imported": t["id"] in imported,
+                "article_id": imported.get(t["id"], {}).get("article_id"),
+            })
+        except gmail_client.GmailError:
+            continue
+    return {"threads": threads, "next_page_token": data.get("nextPageToken")}
+
+
+@app.post("/api/wikis/{wiki_id}/gmail/threads/{thread_id}/import")
+async def gmail_import_thread(wiki_id: int, thread_id: str, _user: dict = Depends(get_current_user)):
+    account = await _require_gmail_account(wiki_id)
+    if not await db.get_wiki(wiki_id):
+        raise HTTPException(status_code=404, detail="Wiki not found.")
+    try:
+        return await email_ingest.ingest_thread(wiki_id, account, thread_id, trigger="manual")
+    except gmail_client.GmailError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.post("/api/wikis/{wiki_id}/gmail/sync")
+async def gmail_sync_now(wiki_id: int, _user: dict = Depends(get_current_user)):
+    account = await _require_gmail_account(wiki_id)
+    try:
+        stats = await gmail_sync.sync_account(account)
+    except gmail_client.GmailError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"stats": stats}
+
+
+# ---------------------------------------------------------------------------
+# Email ingestion status, search, metrics (Phases 2, 4, 5)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/wikis/{wiki_id}/email/status")
+async def email_status(wiki_id: int, _user: dict = Depends(get_current_user)):
+    return {
+        "log": await db.get_sync_log(wiki_id, limit=50),
+        "threads": await db.list_email_threads(wiki_id),
+    }
+
+
+@app.get("/api/wikis/{wiki_id}/email/metrics")
+async def email_metrics(wiki_id: int, _user: dict = Depends(get_current_user)):
+    return {"metrics": await db.get_email_metrics(wiki_id)}
+
+
+@app.get("/api/wikis/{wiki_id}/email/search")
+async def email_search(
+    wiki_id: int,
+    q: str = QParam(None),
+    sender: str = QParam(None),
+    after: str = QParam(None),
+    before: str = QParam(None),
+    has_attachment: bool = QParam(None),
+    topic: str = QParam(None),
+    _user: dict = Depends(get_current_user),
+):
+    try:
+        results = await db.search_email_threads(
+            wiki_id, q=q, sender=sender, after=after, before=before,
+            has_attachment=has_attachment, topic=topic,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Search failed: {e}")
+    return {"results": results}
+
+
+# ---------------------------------------------------------------------------
+# Hygiene & privacy (Phase 5)
+# ---------------------------------------------------------------------------
+
+class DenylistRequest(BaseModel):
+    pattern: str
+
+
+@app.get("/api/wikis/{wiki_id}/email/denylist")
+async def get_denylist(wiki_id: int, _user: dict = Depends(get_current_user)):
+    return {"denylist": await db.list_denylist(wiki_id)}
+
+
+@app.post("/api/wikis/{wiki_id}/email/denylist", status_code=201)
+async def add_denylist_entry(wiki_id: int, req: DenylistRequest, _user: dict = Depends(get_current_user)):
+    if not req.pattern.strip():
+        raise HTTPException(status_code=400, detail="Pattern is required.")
+    return await db.add_denylist(wiki_id, req.pattern)
+
+
+@app.delete("/api/wikis/{wiki_id}/email/denylist/{entry_id}")
+async def delete_denylist_entry(wiki_id: int, entry_id: int, _user: dict = Depends(get_current_user)):
+    if not await db.remove_denylist(wiki_id, entry_id):
+        raise HTTPException(status_code=404, detail="Denylist entry not found.")
+    return {"message": "Denylist entry removed."}
+
+
+class PurgeSenderRequest(BaseModel):
+    sender: str
+    add_to_denylist: bool = True
+
+
+@app.post("/api/wikis/{wiki_id}/email/purge-sender")
+async def purge_sender(wiki_id: int, req: PurgeSenderRequest, _user: dict = Depends(get_current_user)):
+    if not req.sender.strip():
+        raise HTTPException(status_code=400, detail="Sender is required.")
+    return await email_ingest.purge_sender(wiki_id, req.sender.strip(), req.add_to_denylist)
+
+
+@app.delete("/api/wikis/{wiki_id}/articles/{article_id}")
+async def delete_article(wiki_id: int, article_id: int, _user: dict = Depends(get_current_user)):
+    """Delete a wiki page. Email-derived pages also remove their source
+    documents, attachment pages, and orphaned extracted entities (Phase 5)."""
+    article = await db.get_article_by_id(article_id)
+    if not article or article["wiki_id"] != wiki_id:
+        raise HTTPException(status_code=404, detail="Article not found.")
+    if article["kind"] in ("email", "newsletter_issue") or article.get("source_doc_id"):
+        result = await email_ingest.delete_email_page(wiki_id, article_id)
+        return {"message": f"'{article['title']}' deleted.", **result}
+    await db.delete_article_by_id(article_id)
+    return {"message": f"'{article['title']}' deleted.", "pages_deleted": 1, "entities_removed": 0}
 
 
 # ---------------------------------------------------------------------------

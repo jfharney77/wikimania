@@ -381,7 +381,12 @@ async def answer_query(wiki_id: int, question: str) -> dict:
     )
     answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.DOTALL).strip()
 
+    # Email-derived sources cite the original thread with a Gmail deep link (Phase 4).
+    gmail_links = await db.get_email_links_for_articles([r["id"] for r in results])
     return {
         "answer": answer,
-        "sources": [{"id": r["id"], "title": r["title"]} for r in results],
+        "sources": [
+            {"id": r["id"], "title": r["title"], "gmail_url": gmail_links.get(r["id"])}
+            for r in results
+        ],
     }

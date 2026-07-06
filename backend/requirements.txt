@@ -8,3 +8,4 @@ graphifyy
 langgraph
 bcrypt
 python-jose[cryptography]
+pypdf
